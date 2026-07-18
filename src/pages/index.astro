@@ -380,7 +380,6 @@
         overflow: hidden;
         isolation: isolate;
         box-shadow: 0 0 40px rgba(0, 255, 120, 0.25), inset 0 0 60px rgba(0, 255, 120, 0.08);
-        animation: crt-flicker 5s infinite;
       }
       /* Info-card layer: same coordinate space as the radar canvas but placed
          above the circular clip and every CRT overlay, so cards are drawn in
@@ -400,8 +399,16 @@
         border-radius: 50%;
         /* Faint horizontal smear mimics phosphor bleed between scanlines. */
         filter: saturate(1.1) contrast(1.05);
+        /* The tube "flicker" lives here rather than on .crt so the parent that
+           hosts the blended scanline/glare overlays never becomes an animating
+           opacity group. On several Android GPUs, blending against an animating
+           group drops the overlays across part of the circle. */
+        animation: crt-flicker 5s infinite;
       }
-      /* Static scanlines multiplied over the whole tube. */
+      /* Static scanlines multiplied over the whole tube. Each overlay is forced
+         onto its own compositing layer (translateZ + backface-visibility) so
+         Android/Chrome paints the blended gradient across the entire circle
+         instead of tiling only part of it. */
       .crt::before {
         content: '';
         position: absolute;
@@ -417,6 +424,8 @@
           rgba(0, 20, 8, 0.35) 4px
         );
         mix-blend-mode: multiply;
+        transform: translateZ(0);
+        backface-visibility: hidden;
       }
       /* Curved-glass vignette plus a soft top glare highlight. */
       .crt::after {
@@ -429,6 +438,8 @@
         background:
           radial-gradient(ellipse 60% 40% at 50% 16%, rgba(200, 255, 220, 0.08), rgba(200, 255, 220, 0) 60%),
           radial-gradient(circle at 50% 50%, rgba(0, 0, 0, 0) 52%, rgba(0, 10, 4, 0.65) 100%);
+        transform: translateZ(0);
+        backface-visibility: hidden;
       }
       /* Rolling refresh bar that drifts down the tube like a real CRT. */
       .crt-roll {
@@ -446,6 +457,7 @@
           rgba(140, 255, 190, 0) 100%
         );
         mix-blend-mode: screen;
+        backface-visibility: hidden;
         animation: crt-roll 7s linear infinite;
       }
       @keyframes crt-roll {
@@ -462,7 +474,7 @@
         78% { opacity: 0.96; }
       }
       @media (prefers-reduced-motion: reduce) {
-        .crt { animation: none; }
+        #radar { animation: none; }
         .crt-roll { display: none; }
       }
       footer.hud { text-align: center; }
