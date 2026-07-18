@@ -9,6 +9,12 @@
 const TAU = Math.PI * 2;
 const DEG = Math.PI / 180;
 
+// Cap the backing-store resolution on hi-DPI displays. A 3x phone or a Retina
+// laptop paired with a slow GPU has to fill 9x/4x the pixels every frame, which
+// is the usual cause of a choppy sweep. Rendering at up to 2x stays crisp while
+// keeping the per-frame fill cost bounded on weaker hardware.
+const MAX_DPR = 2;
+
 // ---- Special-flight styling ----------------------------------------------
 // Noteworthy contacts (emergency squawk, military, rare airframe) are drawn in
 // a distinct colour and given a floor intensity so they linger and pulse
@@ -349,7 +355,7 @@ export class Radar {
   }
 
   _resize() {
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Math.min(MAX_DPR, window.devicePixelRatio || 1);
     const rect = this.canvas.getBoundingClientRect();
     const size = Math.max(1, Math.min(rect.width, rect.height));
     this.canvas.width = Math.round(size * dpr);
@@ -362,6 +368,9 @@ export class Radar {
     }
     this.dpr = dpr;
     this.size = size;
+    // The background gradient is expensive to build and only depends on the
+    // canvas size, so it's cached between frames and rebuilt only on resize.
+    this._bgGrad = null;
   }
 
   _frame(ts) {
@@ -474,9 +483,15 @@ export class Radar {
   }
 
   _drawBackground(ctx, cx, cy, R) {
-    const g = ctx.createRadialGradient(cx, cy, R * 0.05, cx, cy, R);
-    g.addColorStop(0, 'rgba(9, 40, 20, 0.95)');
-    g.addColorStop(1, 'rgba(3, 15, 8, 0.98)');
+    // Reuse the gradient across frames; it only changes when the canvas is
+    // resized (which clears the cache in _resize).
+    let g = this._bgGrad;
+    if (!g) {
+      g = ctx.createRadialGradient(cx, cy, R * 0.05, cx, cy, R);
+      g.addColorStop(0, 'rgba(9, 40, 20, 0.95)');
+      g.addColorStop(1, 'rgba(3, 15, 8, 0.98)');
+      this._bgGrad = g;
+    }
     ctx.beginPath();
     ctx.arc(cx, cy, R, 0, TAU);
     ctx.fillStyle = g;
@@ -842,16 +857,32 @@ export class Radar {
       lines.push({ text: formatOperator(b.operator) });
     }
 
+    for (const l of lines) {
+      l.h = l.connector ? CONNECTOR_H : LINE_H;
+    }
+
+    // measureText is one of the most expensive canvas calls, and this runs for
+    // every visible card on every animation frame. The card text only changes
+    // when a poll brings new data, so cache the measured width/height against a
+    // signature of the line contents and re-measure only when that changes.
+    const sig = lines.map((l) => `${l.connector ? 'c' : l.bold ? 'b' : 'n'}:${l.text}`).join('|');
+    if (b._labelSig === sig) {
+      return { lines, w: b._labelW, h: b._labelH };
+    }
+
     let w = 0;
     let contentH = 0;
     for (const l of lines) {
-      l.h = l.connector ? CONNECTOR_H : LINE_H;
       contentH += l.h;
       ctx.font = fontForLine(l);
       w = Math.max(w, ctx.measureText(l.text).width);
     }
     w += CARD_PAD * 2;
     const h = contentH + CARD_PAD_Y * 2;
+
+    b._labelSig = sig;
+    b._labelW = w;
+    b._labelH = h;
     return { lines, w, h };
   }
 
