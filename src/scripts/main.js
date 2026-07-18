@@ -74,14 +74,46 @@ const els = {
 // entries are trimmed so the region doesn't grow unbounded over a long session.
 const SR_MAX_LOG = 8;
 
-function announce(msg) {
-  if (!els.srLive || !msg) return;
-  const p = document.createElement('p');
-  p.textContent = msg;
-  els.srLive.appendChild(p);
+// Appearances are signalled by the radar's sweep, which runs inside the
+// requestAnimationFrame render loop. Building the description string and
+// mutating the live-region DOM synchronously there blows the frame budget on
+// slower hardware, producing a visible hitch exactly when a contact appears.
+// So we queue the raw blips and flush them off the render critical path (on
+// idle time), coalescing several appearances from one sweep into a single DOM
+// write via a document fragment.
+const announceQueue = [];
+let announceScheduled = false;
+const scheduleIdle =
+  typeof window.requestIdleCallback === 'function'
+    ? (fn) => window.requestIdleCallback(fn, { timeout: 500 })
+    : (fn) => setTimeout(fn, 0);
+
+function flushAnnouncements() {
+  announceScheduled = false;
+  if (!els.srLive || announceQueue.length === 0) return;
+  const frag = document.createDocumentFragment();
+  for (const b of announceQueue) {
+    const msg = describeAircraft(b);
+    if (!msg) continue;
+    const p = document.createElement('p');
+    p.textContent = msg;
+    frag.appendChild(p);
+  }
+  announceQueue.length = 0;
+  els.srLive.appendChild(frag);
   while (els.srLive.childElementCount > SR_MAX_LOG) {
     els.srLive.removeChild(els.srLive.firstElementChild);
   }
+}
+
+// Called from the radar's onAppear (inside the render frame): do no DOM work
+// here, just enqueue and schedule a flush.
+function announce(blip) {
+  if (!blip) return;
+  announceQueue.push(blip);
+  if (announceScheduled) return;
+  announceScheduled = true;
+  scheduleIdle(flushAnnouncements);
 }
 
 // Rebuild the always-current, navigable list of contacts on the scope. Mirrors
@@ -120,7 +152,7 @@ let currentRange = loadSavedRange();
 const radar = new Radar(els.canvas, {
   rangeNm: currentRange,
   labelCanvas: els.labelCanvas,
-  onAppear: (b) => announce(describeAircraft(b)),
+  onAppear: (b) => announce(b),
   // Radar ping as the sweep crosses a contact (no-op while muted).
   onPing: () => audio.ping(),
 });
