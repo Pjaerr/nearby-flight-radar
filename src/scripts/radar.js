@@ -918,10 +918,13 @@ export class Radar {
       }
       // Special contacts never fade all the way out: they hold a floor glow
       // (and keep their label up) so they stay conspicuous and pulse between
-      // sweeps. Ordinary traffic decays to nothing as before.
+      // sweeps. Ordinary traffic decays to nothing as before. Demo contacts are
+      // held lit too, so every dev/demo button produces a persistent, obvious
+      // blip rather than a brief flash the user is likely to miss between sweeps.
       const special = isSpecial(b);
-      const glowFloor = special ? 0.45 : 0;
-      const labelFloor = special ? 0.6 : 0;
+      const keepLit = special || b._demo === true;
+      const glowFloor = keepLit ? 0.45 : 0;
+      const labelFloor = keepLit ? 0.6 : 0;
       b.intensity = Math.max(glowFloor, b.intensity - k);
       // Labels linger a touch longer than the blip glow.
       b.labelAlpha = Math.max(labelFloor, b.labelAlpha - k * 0.7);
