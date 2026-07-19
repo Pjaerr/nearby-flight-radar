@@ -200,19 +200,64 @@ function loadSavedRange() {
 
 // ---- Passport: countries whose flights have crossed the radar ------------
 //
-// Every time a resolved route's origin or destination country is seen, we bump
-// a counter for that ISO 3166-1 alpha-2 code. Stored in localStorage as
-// { "GB": { c: 12, n: "United Kingdom", t: <ms> }, ... } so the collection
-// survives reloads. The passport modal reads this to highlight a world map.
+// Every resolved route's origin/destination country is recorded, along with
+// the specific flight that visited it. Stored in localStorage (schema v2) as:
+//   {
+//     v: 2,
+//     countries: {
+//       "GB": {
+//         n: "United Kingdom",
+//         c: 12,                 // total sightings -> drives map brightness
+//         first: <ms>, last: <ms>,
+//         flights: [             // specific flights, capped, newest last
+//           { t, cs, reg, ty, op, md, role: 'o'|'d', from: 'LHR', to: 'JFK' }
+//         ]
+//       }
+//     }
+//   }
+// The passport modal reads this to shade a world map (faint -> bright with
+// more flights) and to list countries grouped by the day they were collected.
+
+// Keep per-country flight history bounded so localStorage can't grow forever.
+const MAX_FLIGHTS_PER_COUNTRY = 50;
+
+function emptyPassport() {
+  return { v: 2, countries: {} };
+}
+
+// Bring any older/legacy shape up to the current v2 schema.
+function migratePassport(raw) {
+  if (!raw || typeof raw !== 'object') return emptyPassport();
+  if (raw.v === 2 && raw.countries && typeof raw.countries === 'object') {
+    return raw;
+  }
+  // Legacy shape: { "GB": { c, n, t }, ... } keyed directly by ISO code. We
+  // can't recover per-flight detail, but we preserve counts and last-seen so
+  // the map brightness and day grouping stay meaningful.
+  const countries = {};
+  for (const [code, e] of Object.entries(raw)) {
+    if (!e || typeof e !== 'object') continue;
+    const iso = code.toUpperCase();
+    if (!/^[A-Z]{2}$/.test(iso)) continue;
+    const t = typeof e.t === 'number' ? e.t : Date.now();
+    countries[iso] = {
+      n: e.n || '',
+      c: typeof e.c === 'number' ? e.c : 1,
+      first: t,
+      last: t,
+      flights: [],
+    };
+  }
+  return { v: 2, countries };
+}
 
 function loadPassport() {
   try {
     const raw = localStorage.getItem(LS_PASSPORT_KEY);
-    if (!raw) return {};
-    const v = JSON.parse(raw);
-    return v && typeof v === 'object' ? v : {};
+    if (!raw) return emptyPassport();
+    return migratePassport(JSON.parse(raw));
   } catch {
-    return {};
+    return emptyPassport();
   }
 }
 
@@ -226,29 +271,51 @@ function savePassport() {
   }
 }
 
-// Record one sighting of a country from a route endpoint. Returns true when a
-// valid two-letter code was stored so the caller knows to persist.
-function recordCountry(iso, name) {
+// Record one sighting of a country from a route endpoint, optionally storing
+// the specific flight that visited it. Returns true when a valid two-letter
+// code was stored so the caller knows to persist.
+function recordCountry(iso, name, flight) {
   const code = (iso || '').toUpperCase();
   if (!/^[A-Z]{2}$/.test(code)) return false;
-  const entry = passport[code] || { c: 0, n: '' };
+  const now = Date.now();
+  const entry = passport.countries[code] || { n: '', c: 0, first: now, last: now, flights: [] };
   entry.c += 1;
-  entry.t = Date.now();
+  entry.last = now;
+  if (!entry.first) entry.first = now;
   if (name && !entry.n) entry.n = name;
-  passport[code] = entry;
+  if (!Array.isArray(entry.flights)) entry.flights = [];
+  if (flight) {
+    entry.flights.push(flight);
+    // Drop the oldest records once we exceed the cap.
+    if (entry.flights.length > MAX_FLIGHTS_PER_COUNTRY) {
+      entry.flights.splice(0, entry.flights.length - MAX_FLIGHTS_PER_COUNTRY);
+    }
+  }
+  passport.countries[code] = entry;
   return true;
 }
 
 // Pull both endpoints of a resolved route into the passport, persisting once.
-function recordRouteCountries(route) {
+// `aircraft` (the live blip/contact) supplies the flight-level detail stored
+// against each country.
+function recordRouteCountries(route, aircraft) {
   if (!route) return;
+  const o = route.origin;
+  const d = route.destination;
+  const endpointCode = (ap) => (ap ? ap.iata || ap.icao || ap.municipality || ap.countryIso || '' : '');
+  const base = {
+    t: Date.now(),
+    cs: (aircraft && aircraft.callsign) || '',
+    reg: (aircraft && aircraft.registration) || '',
+    ty: (aircraft && aircraft.type) || '',
+    op: (aircraft && aircraft.operator) || '',
+    md: (aircraft && aircraft.model) || '',
+    from: endpointCode(o),
+    to: endpointCode(d),
+  };
   let changed = false;
-  if (route.origin) {
-    changed = recordCountry(route.origin.countryIso, route.origin.countryName) || changed;
-  }
-  if (route.destination) {
-    changed = recordCountry(route.destination.countryIso, route.destination.countryName) || changed;
-  }
+  if (o) changed = recordCountry(o.countryIso, o.countryName, { ...base, role: 'o' }) || changed;
+  if (d) changed = recordCountry(d.countryIso, d.countryName, { ...base, role: 'd' }) || changed;
   if (changed) savePassport();
 }
 
@@ -663,13 +730,38 @@ const LAND_STYLE = {
   fillOpacity: 1,
 };
 
+// Map a flight count to a fill opacity. A single sighting is deliberately very
+// faint, and the glow brightens with each additional flight along a gentle
+// saturating curve, so there's plenty of headroom before a country maxes out.
+function fillOpacityForCount(c) {
+  if (!c || c <= 0) return 0;
+  const min = 0.1;
+  const max = 0.9;
+  const K = 18; // larger -> slower brightening (more "room to manoeuvre")
+  const t = 1 - 1 / (1 + c / K);
+  return min + (max - min) * t;
+}
+
 // Country layer sits on top of the land base and only paints visited countries
-// green. Unvisited countries stay invisible (but still hoverable for tooltips)
-// so the simplified, non-shared country borders never show as slivers.
+// green, brighter the more flights have covered them. Unvisited countries stay
+// invisible (but still hoverable for tooltips) so the simplified, non-shared
+// country borders never show as slivers.
 function styleForFeature(feature) {
   const iso = featureIso2(feature.properties);
-  if (iso && passport[iso]) {
-    return { stroke: true, color: '#7dffb4', weight: 1, fill: true, fillColor: '#00ff78', fillOpacity: 0.9 };
+  const entry = iso ? passport.countries[iso] : null;
+  const c = entry ? entry.c : 0;
+  if (c > 0) {
+    const op = fillOpacityForCount(c);
+    // The outline tracks the fill but stays a touch brighter and subtle.
+    const strokeAlpha = Math.min(0.9, 0.18 + op * 0.6);
+    return {
+      stroke: true,
+      color: `rgba(125, 255, 180, ${strokeAlpha.toFixed(3)})`,
+      weight: 0.8,
+      fill: true,
+      fillColor: '#00ff78',
+      fillOpacity: op,
+    };
   }
   return { stroke: false, fill: true, fillColor: '#000000', fillOpacity: 0 };
 }
@@ -678,31 +770,127 @@ let passportMap;
 let passportGeoLayer;
 let passportLandLayer;
 
-// Refresh the count readout and the chip list from the current passport.
+// Local calendar-day key (YYYY-MM-DD) for grouping sightings by the day they
+// were collected.
+function dayKeyOf(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Friendly heading for a day key: "Today"/"Yesterday", else e.g. "Mon 7 Jul".
+function dayLabelOf(key) {
+  const now = Date.now();
+  if (key === dayKeyOf(now)) return 'Today';
+  if (key === dayKeyOf(now - 86400000)) return 'Yesterday';
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+// One flight record -> a compact one-liner, e.g. "BA123 · G-XLEB · A320 · LHR->JFK".
+function flightLine(fl) {
+  const parts = [];
+  if (fl.cs) parts.push(fl.cs);
+  if (fl.reg) parts.push(fl.reg);
+  if (fl.ty) parts.push(fl.ty);
+  const from = fl.from || '?';
+  const to = fl.to || '?';
+  if (fl.from || fl.to) parts.push(`${from}\u2192${to}`);
+  return parts.join(' \u00b7 ') || 'flight';
+}
+
+// Tooltip/title text summarising the flights recorded for a country on a day.
+function flightsTitle(name, flights, count) {
+  const header = `${name} \u2014 ${count} flight${count === 1 ? '' : 's'}`;
+  if (!flights || !flights.length) return header;
+  const lines = flights
+    .slice()
+    .reverse()
+    .slice(0, 8)
+    .map((fl) => `\u2022 ${flightLine(fl)}`);
+  const more = flights.length > 8 ? `\n\u2026and ${flights.length - 8} more` : '';
+  return `${header}\n${lines.join('\n')}${more}`;
+}
+
+// Group every recorded sighting by the day it happened. Returns days newest
+// first, each with the countries collected that day (with their per-day flight
+// counts and records).
+function buildPassportDays() {
+  const map = new Map(); // dayKey -> Map(iso -> { iso, name, count, flights })
+  const ensure = (key, iso, name) => {
+    let day = map.get(key);
+    if (!day) {
+      day = new Map();
+      map.set(key, day);
+    }
+    let c = day.get(iso);
+    if (!c) {
+      c = { iso, name: name || iso, count: 0, flights: [] };
+      day.set(iso, c);
+    }
+    return c;
+  };
+
+  for (const [iso, entry] of Object.entries(passport.countries)) {
+    const flights = Array.isArray(entry.flights) ? entry.flights : [];
+    if (flights.length) {
+      for (const fl of flights) {
+        const c = ensure(dayKeyOf(fl.t || entry.last || Date.now()), iso, entry.n);
+        c.count += 1;
+        c.flights.push(fl);
+      }
+    } else {
+      // Legacy/migrated entry with no per-flight detail: place its whole count
+      // on its last-seen day.
+      const c = ensure(dayKeyOf(entry.last || entry.first || Date.now()), iso, entry.n);
+      c.count += entry.c || 1;
+    }
+  }
+
+  return [...map.entries()]
+    .map(([key, isoMap]) => ({
+      key,
+      label: dayLabelOf(key),
+      countries: [...isoMap.values()].sort((a, b) => b.count - a.count || a.iso.localeCompare(b.iso)),
+    }))
+    .sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
+}
+
+// Refresh the count readout and the day-grouped country list.
 function renderPassportStats() {
-  const codes = Object.keys(passport);
+  const codes = Object.keys(passport.countries);
   els.passportCount.textContent = `${codes.length} / ${WORLD_COUNTRY_TOTAL} countries`;
 
-  const sorted = codes
-    .map((code) => ({ code, ...passport[code] }))
-    .sort((a, b) => b.c - a.c || a.code.localeCompare(b.code));
-
   els.passportList.innerHTML = '';
-  if (!sorted.length) {
+  if (!codes.length) {
     const empty = document.createElement('p');
     empty.className = 'passport-empty';
     empty.textContent = 'No countries yet. Leave the radar running to collect them.';
     els.passportList.appendChild(empty);
     return;
   }
-  for (const item of sorted) {
-    const chip = document.createElement('span');
-    chip.className = 'passport-chip';
-    const f = flagEmoji(item.code);
-    const label = item.n || item.code;
-    chip.textContent = `${f ? `${f} ` : ''}${label} \u00b7 ${item.c}`;
-    chip.title = `${label}: ${item.c} flight${item.c === 1 ? '' : 's'}`;
-    els.passportList.appendChild(chip);
+
+  for (const day of buildPassportDays()) {
+    const section = document.createElement('div');
+    section.className = 'passport-day';
+
+    const head = document.createElement('div');
+    head.className = 'passport-day-head';
+    const n = day.countries.length;
+    head.textContent = `${day.label} \u00b7 ${n} countr${n === 1 ? 'y' : 'ies'}`;
+    section.appendChild(head);
+
+    const chips = document.createElement('div');
+    chips.className = 'passport-day-chips';
+    for (const c of day.countries) {
+      const chip = document.createElement('span');
+      chip.className = 'passport-chip';
+      const f = flagEmoji(c.iso);
+      chip.textContent = `${f ? `${f} ` : ''}${c.name || c.iso} \u00b7 ${c.count}`;
+      chip.title = flightsTitle(c.name || c.iso, c.flights, c.count);
+      chips.appendChild(chip);
+    }
+    section.appendChild(chips);
+    els.passportList.appendChild(section);
   }
 }
 
@@ -756,11 +944,14 @@ async function openPassport() {
         const iso = featureIso2(feature.properties);
         const props = feature.properties;
         const name = props.NAME || props.ADMIN || props.NAME_LONG || iso;
-        const entry = iso ? passport[iso] : null;
-        const seen = entry
-          ? `${entry.c} flight${entry.c === 1 ? '' : 's'}`
-          : 'not seen yet';
-        layer.bindTooltip(`${name} \u2014 ${seen}`, { sticky: true });
+        const entry = iso ? passport.countries[iso] : null;
+        let tip = `${name} \u2014 not seen yet`;
+        if (entry) {
+          const latest = entry.flights && entry.flights.length ? entry.flights[entry.flights.length - 1] : null;
+          tip = `${name} \u2014 ${entry.c} flight${entry.c === 1 ? '' : 's'}`;
+          if (latest) tip += `<br><span class="tip-flight">${flightLine(latest)}</span>`;
+        }
+        layer.bindTooltip(tip, { sticky: true });
       },
     }).addTo(passportMap);
   } else if (passportGeoLayer) {
@@ -777,7 +968,7 @@ function closePassport() {
 }
 
 function resetPassport() {
-  passport = {};
+  passport = emptyPassport();
   savePassport();
   renderPassportStats();
   if (passportGeoLayer) passportGeoLayer.setStyle(styleForFeature);
@@ -1070,7 +1261,7 @@ function spawnDemo(kind) {
     announced: false,
     lastUpdate: performance.now(),
   });
-  if (a.route) recordRouteCountries(a.route);
+  if (a.route) recordRouteCountries(a.route, a);
   updateAircraftList();
 }
 
@@ -1173,13 +1364,29 @@ function scheduleNextPoll(delay) {
 
 // Run one poll, then schedule the next: back to the normal cadence on success,
 // or an exponentially growing delay (capped) on failure so we don't hammer a
-// struggling API.
+// struggling API. A 429 (rate limited) is handled gently \u2014 the contacts already
+// on the scope stay put (poll leaves them untouched on failure) and we wait out
+// the server's requested cooldown before trying again.
 async function runPoll() {
-  const ok = await poll();
-  if (ok) {
+  const err = await poll();
+  if (!err) {
     pollDelay = pollIntervalForRange(currentRange);
   } else {
-    pollDelay = Math.min(CONFIG.maxBackoffMs, Math.max(pollIntervalForRange(currentRange), pollDelay * 2));
+    // Exponential backoff, floored at the range's normal cadence and capped so
+    // we keep checking periodically.
+    let delay = Math.min(CONFIG.maxBackoffMs, Math.max(pollIntervalForRange(currentRange), pollDelay * 2));
+    if (err.rateLimited) {
+      // Honor an explicit Retry-After even if it exceeds our usual ceiling:
+      // the server told us exactly how long to wait, so respect it rather than
+      // poking it again early and risking another 429.
+      if (err.retryAfterMs != null) delay = Math.max(delay, err.retryAfterMs);
+      const secs = Math.round(delay / 1000);
+      setStatus(`Rate limited by airplanes.live \u2014 holding contacts, retrying in ${secs}s\u2026`, 'warn');
+    } else {
+      const secs = Math.round(delay / 1000);
+      setStatus(`Data fetch failed: ${err.message}. Retrying in ${secs}s\u2026`, 'error');
+    }
+    pollDelay = delay;
   }
   scheduleNextPoll(pollDelay);
 }
@@ -1192,8 +1399,11 @@ function restartPolling() {
   runPoll();
 }
 
-// Returns true on a successful fetch, false on failure (so runPoll can back
-// off). Never throws.
+// Returns null on a successful fetch, or the error on failure (so runPoll can
+// back off and message appropriately). On failure it deliberately leaves the
+// current blips untouched \u2014 no update, no prune \u2014 so the contacts already on
+// the scope stay visible (and keep flaring under the sweep) while we wait out
+// a transient outage or rate limit. Never throws.
 async function poll() {
   try {
     const aircraft = await fetchNearbyAircraft(center.lat, center.lon, currentRange);
@@ -1244,19 +1454,20 @@ async function poll() {
         b.route = route;
         b.routeResolved = true;
         b.routePending = false;
-        // Stamp the origin/destination countries into the passport. The guard
-        // above means this fires once per blip appearance, not every poll.
-        recordRouteCountries(route);
+        // Stamp the origin/destination countries (and this flight's detail)
+        // into the passport. The guard above means this fires once per blip
+        // appearance, not every poll.
+        recordRouteCountries(route, b);
         // The contact just became ready (and thus eligible for the scope and
         // the text list), so refresh the accessible list to include it.
         updateAircraftList();
       });
     }
-    return true;
+    return null;
   } catch (err) {
-    const secs = Math.round(Math.min(CONFIG.maxBackoffMs, Math.max(pollIntervalForRange(currentRange), pollDelay * 2)) / 1000);
-    setStatus(`Data fetch failed: ${err.message}. Retrying in ${secs}s\u2026`, 'error');
-    return false;
+    // Leave the existing contacts on the scope; runPoll decides the backoff and
+    // surfaces the right message based on the error (rate limit vs. hard fail).
+    return err;
   }
 }
 

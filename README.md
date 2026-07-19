@@ -5,19 +5,28 @@ of aircraft flying near you. Flights are plotted as blips; when the sweep passes
 over one it "pings" and reveals the **flight number** and **origin → destination**.
 
 No backend, no API keys, no scraping. Everything runs in the browser against two
-keyless, CORS-enabled public APIs:
+keyless, CORS-enabled public sources:
 
 - **[airplanes.live](https://airplanes.live/api-guide/)** — live ADS-B positions
   around a point (returns distance + bearing from the center, ideal for a radar).
-- **[adsb.lol](https://api.adsb.lol/docs)** `/api/0/routeset` — resolves a callsign
-  **plus the aircraft's live position** to its departure/arrival airports, returning
-  only the route it deems *plausible* for that position (cached in-memory +
-  `localStorage`). Route data is [vradarserver standing-data](https://github.com/vradarserver/standing-data)
-  under ODbL. Passing the position matters: a callsign alone is often ambiguous
-  (reused across different city pairs), so a callsign-only lookup can confidently
-  return a route belonging to a completely different flight.
+- **[vradarserver standing-data](https://github.com/vradarserver/standing-data)**
+  via `adsb.lol` — one JSON file per callsign
+  (`https://vrs-standing-data.adsb.lol/routes/BA/BAW123.json`) giving its
+  departure/arrival airports, under ODbL and cached in-memory + `localStorage`.
+  These files are keyed on callsign alone, which is often ambiguous (a callsign
+  reused across different city pairs), so a naive lookup can return a route
+  belonging to a completely different flight. Because each file also carries the
+  airports' coordinates, the app disambiguates **client-side**: it keeps a route
+  only if the aircraft's live position falls within a great-circle corridor of
+  the route, and rejects the mismatches.
 
 Both are free for non-commercial use and rate-limited to ~1 request/second.
+
+> **Why not `adsb.lol`'s `/api/0/routeset`?** That position-aware POST endpoint
+> would do the plausibility check server-side, but it no longer returns CORS
+> headers on its preflight, so a static browser-only site can't call it. The
+> static standing-data files it's built on *are* CORS-enabled, so we read those
+> directly and do the plausibility check ourselves.
 
 ## Run it
 

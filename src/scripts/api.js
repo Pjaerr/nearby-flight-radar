@@ -1,17 +1,65 @@
-// Data layer. Two keyless, CORS-enabled public APIs:
+// Data layer. Two keyless, CORS-enabled public sources:
 //   - airplanes.live  -> live ADS-B positions around a point
-//   - adsb.lol        -> callsign + position -> plausible route (origin/dest)
+//   - adsb.lol        -> callsign -> route (origin/dest), plausibility checked here
 // Both send `Access-Control-Allow-Origin: *`, so the browser calls them
 // directly. No proxy, no API key, no backend.
 
 const POSITIONS_BASE = 'https://api.airplanes.live/v2/point';
-// Position-aware route lookup. Unlike a callsign-only service, this one takes
-// the aircraft's live lat/lng and only returns a route it considers plausible
-// for that position, so a reused or stale callsign no longer resolves to a
-// route belonging to a completely different flight. Data: vradarserver
-// standing-data via adsb.lol (ODbL). It's a POST endpoint that accepts a batch
-// of planes and returns one route object per plane.
-const ROUTESET_URL = 'https://api.adsb.lol/api/0/routeset';
+// Route lookup. adsb.lol's `/api/0/routeset` POST endpoint is position-aware but
+// no longer sends CORS headers on its preflight, so a static site can't call it
+// from the browser. Instead we hit the underlying vradarserver standing-data
+// files directly (ODbL) \u2014 the same data adsb.lol's `GET /api/0/route/:callsign`
+// just redirects to \u2014 which *are* CORS-enabled. They're laid out one JSON file
+// per callsign under a two-letter shard: /routes/BA/BAW123.json.
+//
+// Those files are callsign-only (no server-side plausibility), so a callsign
+// reused across different city pairs would otherwise resolve to the wrong
+// flight. We recover the check locally: the files include each airport's
+// lat/lon, so `isRoutePlausible()` rejects a route whose great-circle corridor
+// the overhead aircraft is nowhere near (see below).
+const ROUTES_BASE = 'https://vrs-standing-data.adsb.lol/routes';
+
+// Half-width (nautical miles) of the great-circle corridor a contact must fall
+// within for a callsign's route to be considered plausible. Generous on
+// purpose: real flights deviate from the direct path for airways and weather,
+// but a mislabelled/reused callsign is typically off by an entire ocean, so a
+// loose corridor still rejects the gross mismatches without dropping legit
+// flights that are merely off-track.
+const ROUTE_CORRIDOR_NM = 250;
+const EARTH_RADIUS_NM = 3440.065;
+
+// Build the standing-data URL for a callsign: /routes/<first two chars>/<CS>.json.
+function routeUrlFor(callsign) {
+  const cs = callsign.toUpperCase();
+  return `${ROUTES_BASE}/${encodeURIComponent(cs.slice(0, 2))}/${encodeURIComponent(cs)}.json`;
+}
+
+// ---- Structured API errors -----------------------------------------------
+// A typed error so the poller can treat rate limiting (HTTP 429) as its own
+// gentle case \u2014 keep the contacts already on the scope and wait out the
+// server-suggested cooldown \u2014 rather than a hard "data fetch failed".
+export class ApiError extends Error {
+  constructor(message, { status = 0, retryAfterMs = null } = {}) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    // Server-requested cooldown in ms (from the Retry-After header), or null.
+    this.retryAfterMs = retryAfterMs;
+    this.rateLimited = status === 429;
+  }
+}
+
+// Parse an HTTP `Retry-After` header into milliseconds. It's either a
+// delta-seconds count or an HTTP date; returns null when absent/unparseable.
+function parseRetryAfter(res) {
+  const h = res.headers.get('Retry-After');
+  if (!h) return null;
+  const secs = Number(h);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const when = Date.parse(h);
+  if (!Number.isNaN(when)) return Math.max(0, when - Date.now());
+  return null;
+}
 
 // ---- Aircraft size classification ----------------------------------------
 // Buckets every contact into a rough physical size so the radar can draw a
@@ -133,7 +181,12 @@ export async function fetchNearbyAircraft(lat, lon, rangeNm) {
   const radius = Math.min(Math.max(Math.round(rangeNm), 1), 250);
   const url = `${POSITIONS_BASE}/${lat}/${lon}/${radius}`;
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!res.ok) throw new Error(`positions HTTP ${res.status}`);
+  if (!res.ok) {
+    throw new ApiError(`positions HTTP ${res.status}`, {
+      status: res.status,
+      retryAfterMs: res.status === 429 ? parseRetryAfter(res) : null,
+    });
+  }
   const data = await res.json();
   const list = Array.isArray(data.ac) ? data.ac : [];
 
@@ -286,11 +339,82 @@ function cacheRoute(callsign, value) {
   writeLocalStorage(callsign, value, expires);
 }
 
+// ---- Client-side route plausibility --------------------------------------
+// The standing-data files are keyed on callsign alone, so a callsign reused
+// across different city pairs resolves to whichever single route is on file.
+// We guard against that here using the aircraft's live position and the airport
+// coordinates in the file: a contact genuinely flying A->B sits near the
+// great-circle path between them, whereas a mislabelled callsign lands the
+// contact far from the corridor of the route it points at.
+
+const toRad = (deg) => (deg * Math.PI) / 180;
+
+// Great-circle (haversine) distance between two lat/lon points, in nm.
+function haversineNm(lat1, lon1, lat2, lon2) {
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return EARTH_RADIUS_NM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Initial bearing (radians) from point 1 to point 2 along the great circle.
+function initialBearing(lat1, lon1, lat2, lon2) {
+  const dLon = toRad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+  const x =
+    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+    Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+  return Math.atan2(y, x);
+}
+
+// Is point P plausibly on the leg A->B? True when P's perpendicular
+// (cross-track) distance from the A->B great circle is within the corridor AND
+// P projects roughly between A and B (along-track), with a corridor-sized
+// margin so contacts just short of / past an airport still count.
+function nearLeg(pLat, pLon, aLat, aLon, bLat, bLon) {
+  const legLen = haversineNm(aLat, aLon, bLat, bLon);
+  if (legLen === 0) return haversineNm(pLat, pLon, aLat, aLon) <= ROUTE_CORRIDOR_NM;
+
+  const distAP = haversineNm(aLat, aLon, pLat, pLon) / EARTH_RADIUS_NM; // angular
+  const bearAP = initialBearing(aLat, aLon, pLat, pLon);
+  const bearAB = initialBearing(aLat, aLon, bLat, bLon);
+
+  const crossTrack = Math.abs(Math.asin(Math.sin(distAP) * Math.sin(bearAP - bearAB)) * EARTH_RADIUS_NM);
+  if (crossTrack > ROUTE_CORRIDOR_NM) return false;
+
+  // Along-track distance of P's projection from A, in nm. `acos` only yields the
+  // magnitude, so restore the sign from the bearing delta: when P bears more
+  // than 90 deg off the A->B heading it lies *behind* A (negative along-track),
+  // which must be rejected rather than wrapping around the far side of the globe.
+  const alongMag =
+    Math.acos(Math.cos(distAP) / Math.cos(crossTrack / EARTH_RADIUS_NM)) * EARTH_RADIUS_NM;
+  const alongTrack = Math.cos(bearAP - bearAB) < 0 ? -alongMag : alongMag;
+  return alongTrack >= -ROUTE_CORRIDOR_NM && alongTrack <= legLen + ROUTE_CORRIDOR_NM;
+}
+
+// A multi-leg route is plausible if the contact is near any single leg.
+function isRoutePlausible(airports, lat, lon) {
+  for (let i = 0; i < airports.length - 1; i++) {
+    const a = airports[i];
+    const b = airports[i + 1];
+    if (
+      Number.isFinite(a?.lat) && Number.isFinite(a?.lon) &&
+      Number.isFinite(b?.lat) && Number.isFinite(b?.lon) &&
+      nearLeg(lat, lon, a.lat, a.lon, b.lat, b.lon)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Resolve a callsign to { origin, destination } (each with iata, icao,
  * municipality, name) or null if unknown. Needs the aircraft's live position
- * (lat, lon) so the route API can confirm the route is plausible for *this*
- * contact rather than a different flight sharing the callsign. Never throws.
+ * (lat, lon) to confirm the route is plausible for *this* contact rather than a
+ * different flight sharing the callsign. Never throws.
  */
 export async function lookupRoute(callsign, lat, lon) {
   if (!callsign) return null;
@@ -306,43 +430,46 @@ export async function lookupRoute(callsign, lat, lon) {
     return cached.value;
   }
 
-  // The route API needs the aircraft's live position to pick the plausible
-  // route; without a fix there's nothing to disambiguate against, so bail
-  // (without caching) and let a later poll with a position retry.
+  // Plausibility needs the aircraft's live position; without a fix there's
+  // nothing to disambiguate against, so bail (without caching) and let a later
+  // poll with a position retry.
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
 
   try {
-    const res = await fetch(ROUTESET_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ planes: [{ callsign, lat, lng: lon }] }),
-    });
-    // 4xx/5xx (bad request, rate limit, server error) are transient here:
+    const res = await fetch(routeUrlFor(callsign), { headers: { Accept: 'application/json' } });
+
+    // 404 = no route on file for this callsign. That's a deterministic answer,
+    // so cache the miss with its short TTL rather than re-asking every sighting.
+    if (res.status === 404) {
+      cacheRoute(callsign, null);
+      return null;
+    }
+    // Other non-OK responses (rate limit, 5xx, edge hiccup) are transient:
     // don't cache, just retry on the next sighting.
     if (!res.ok) return null;
-    const data = await res.json();
-    const r = Array.isArray(data) ? data[0] : null;
 
-    // No route on file for this callsign (`airport_codes: "unknown"`). That's a
-    // deterministic answer for the callsign, so cache the miss with its short
-    // TTL rather than re-asking every sighting.
-    if (!r || r.airport_codes === 'unknown' || !Array.isArray(r._airports) || r._airports.length < 2) {
+    const r = await res.json();
+    const airports = Array.isArray(r?._airports) ? r._airports : [];
+
+    // A malformed/incomplete record (fewer than two airports) is treated like a
+    // miss: cache it so we don't re-fetch a file that can't yield a route.
+    if (r?.airport_codes === 'unknown' || airports.length < 2) {
       cacheRoute(callsign, null);
       return null;
     }
 
     // A route exists but the aircraft isn't near its great-circle corridor:
-    // almost always a reused/aliased callsign pointing at the wrong flight (the
-    // bug this endpoint fixes). Reject it, but *don't* cache \u2014 plausibility is
-    // position-dependent, so a later, correctly-placed sighting should re-check.
-    if (!r.plausible) return null;
+    // almost always a reused/aliased callsign pointing at the wrong flight.
+    // Reject it, but *don't* cache \u2014 plausibility is position-dependent, so a
+    // later, correctly-placed sighting should re-check.
+    if (!isRoutePlausible(airports, lat, lon)) return null;
 
     const route = {
-      // The route API only carries an airline *code*; the human-readable
-      // operator name (from the positions feed) is used at display time.
+      // The file only carries an airline *code*; the human-readable operator
+      // name (from the positions feed) is used at display time.
       airline: null,
-      origin: pickAirport(r._airports[0]),
-      destination: pickAirport(r._airports[r._airports.length - 1]),
+      origin: pickAirport(airports[0]),
+      destination: pickAirport(airports[airports.length - 1]),
     };
     cacheRoute(callsign, route);
     return route;

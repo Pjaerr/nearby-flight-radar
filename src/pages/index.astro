@@ -278,7 +278,7 @@
           <button id="passport-reset" type="button" class="passport-reset">Reset</button>
         </div>
         <div id="passport-list" class="passport-list"></div>
-        <p class="modal-hint">Countries light up when a flight to or from there crosses your radar.</p>
+        <p class="modal-hint">Countries glow brighter the more flights to or from there cross your radar. Hover a country for its flights; the list below groups your collection by day.</p>
       </div>
     </div>
 
@@ -909,11 +909,35 @@
       .passport-reset:hover { background: rgba(0, 255, 120, 0.25); }
       .passport-list {
         display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-        max-height: 96px;
+        flex-direction: column;
+        gap: 10px;
+        max-height: 168px;
         overflow-y: auto;
         padding: 6px 14px 4px;
+      }
+      .passport-day {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+      .passport-day-head {
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--green);
+        opacity: 0.75;
+        text-shadow: 0 0 6px rgba(0, 255, 120, 0.35);
+      }
+      .passport-day-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .passport-map :global(.leaflet-tooltip) .tip-flight {
+        display: block;
+        margin-top: 2px;
+        opacity: 0.75;
+        font-size: 10px;
       }
       .passport-chip {
         font-size: 11px;
