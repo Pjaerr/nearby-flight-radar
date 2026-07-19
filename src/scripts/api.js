@@ -309,6 +309,38 @@ const LIGHT_TYPES = new Set([
   'GLID', 'ULAC', 'GLST',
 ]);
 
+// Common ICAO type codes for rotorcraft, used as a fallback when the ADS-B
+// emitter category is missing/wrong (many GA helicopters don't broadcast the
+// A7 rotorcraft category). Not exhaustive — just the airframes that turn up
+// most on a civilian feed (police/HEMS/news/offshore/private).
+const HELI_TYPES = new Set([
+  // Airbus / Eurocopter
+  'EC20', 'EC25', 'EC30', 'EC35', 'EC45', 'EC55', 'EC75',
+  'H120', 'H125', 'H130', 'H135', 'H140', 'H145', 'H155', 'H160', 'H175', 'H215', 'H225',
+  'AS32', 'AS3B', 'AS50', 'AS55', 'AS65', 'A109', 'A119', 'A139', 'A169', 'A189',
+  'GAZL', 'ALO2', 'ALO3', 'PUMA', 'SUCO',
+  // Bell
+  'B06', 'B06T', 'B429', 'B412', 'B407', 'B427', 'B430', 'B505', 'B47G', 'B222', 'B230', 'B412',
+  // Robinson
+  'R22', 'R44', 'R66',
+  // Sikorsky
+  'S76', 'S92', 'S61', 'S64', 'H60', 'UH60', 'S70',
+  // MD / Hughes / Enstrom / Schweizer / Guimbal
+  'H500', 'H269', 'EN28', 'EN48', 'S269', 'S300', 'CABR',
+  // Leonardo / AgustaWestland (also covered above), Kamov, Mi, Boeing
+  'AW09', 'AW19', 'AW39', 'AW89', 'AW69', 'KA32', 'MI8', 'MI17', 'MI2', 'EH10',
+]);
+
+// True when a contact is a helicopter/rotorcraft, so the radar can draw a
+// helicopter icon rather than a fixed-wing silhouette. The ADS-B emitter
+// category A7 (rotorcraft) is the reliable signal when present; otherwise fall
+// back to a recognized rotorcraft ICAO type code. A contact broadcasting
+// neither can't be identified and defaults to a plane.
+function isRotorcraft(category, type) {
+  if (category === 'A7') return true;
+  return HELI_TYPES.has((type || '').toUpperCase());
+}
+
 // ADS-B emitter/wake category (A1-A7). A1/A2 are light & small aircraft, A5 is
 // "heavy" (>300k lb); A3/A4 sit in the middle (narrowbodies, B757). A7 is
 // rotorcraft, which we treat as light for size purposes.
@@ -427,6 +459,10 @@ export async function fetchNearbyAircraft(lat, lon, rangeNm) {
       // a plane icon so a jumbo reads bigger than a Cessna at a glance. Derived
       // from the ADS-B wake category when present, else the ICAO type code.
       sizeClass: classifySize(a.category, type),
+      // Whether the contact is a helicopter/rotorcraft, so the radar draws a
+      // helicopter icon instead of a fixed-wing silhouette. From the A7 emitter
+      // category, or a recognized rotorcraft type code as a fallback.
+      isRotor: isRotorcraft(a.category, type),
       // Human-readable model, e.g. "BOEING 767-300". Falls back to the ICAO
       // type code at display time when this is absent.
       model: a.desc || '',

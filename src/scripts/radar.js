@@ -1,3 +1,5 @@
+import { CONFIG } from "../config.js";
+
 // Green phosphor radar renderer (vanilla canvas, no dependencies).
 //
 // Aircraft are plotted in polar coordinates using the distance/bearing that
@@ -8,6 +10,56 @@
 
 const TAU = Math.PI * 2;
 const DEG = Math.PI / 180;
+
+// ---- Position interpolation (visual-only) ---------------------------------
+// Blips are polled every few seconds; between ticks we lerp toward the latest
+// fix and dead-reckon with ground speed + track so motion reads continuously.
+// Polled `distanceNm` / `bearingDeg` stay the API truth for alerts and logging.
+
+function lerpAngle(degA, degB, t) {
+  const d = (((degB - degA + 540) % 360) - 180);
+  return (degA + d * t + 360) % 360;
+}
+
+function polarToEnu(distanceNm, bearingDeg) {
+  const rad = bearingDeg * DEG;
+  return {
+    e: distanceNm * Math.sin(rad),
+    n: distanceNm * Math.cos(rad),
+  };
+}
+
+function enuToPolar(e, n) {
+  const distanceNm = Math.hypot(e, n);
+  if (distanceNm < 1e-6) return { distanceNm: 0, bearingDeg: 0 };
+  const bearingDeg = ((Math.atan2(e, n) * 180) / Math.PI + 360) % 360;
+  return { distanceNm, bearingDeg };
+}
+
+// Advance a center-relative polar position along a ground track for dt seconds.
+function advancePolar(distanceNm, bearingDeg, trackDeg, speedKt, dtSec) {
+  if (
+    dtSec <= 0 ||
+    typeof trackDeg !== "number" ||
+    typeof speedKt !== "number" ||
+    speedKt <= 0
+  ) {
+    return { distanceNm, bearingDeg };
+  }
+  const stepNm = speedKt * (dtSec / 3600);
+  const tr = trackDeg * DEG;
+  const { e, n } = polarToEnu(distanceNm, bearingDeg);
+  return enuToPolar(e + Math.sin(tr) * stepNm, n + Math.cos(tr) * stepNm);
+}
+
+function interpolationActive() {
+  if (!CONFIG.interpolationEnabled) return false;
+  try {
+    return !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return true;
+  }
+}
 
 // Cap the backing-store resolution on hi-DPI displays. A 3x phone or a Retina
 // laptop paired with a slow GPU has to fill 9x/4x the pixels every frame, which
@@ -38,7 +90,7 @@ function blipAccent(b) {
   const f = b.flags || {};
   if (f.emergency) {
     // Radio-failure reads amber; hijack/general-emergency read red.
-    return f.emergency === 'radio-failure'
+    return f.emergency === "radio-failure"
       ? { rgb: [255, 190, 60], special: true }
       : { rgb: [255, 80, 80], special: true };
   }
@@ -57,21 +109,21 @@ const rgba = ([r, g, b], a) => `rgba(${r}, ${g}, ${b}, ${a})`;
 // Short uppercase tag shown at the top of a special contact's info card.
 function specialTag(b) {
   const f = b.flags || {};
-  if (f.emergency === 'hijack') return '\u26a0 HIJACK';
-  if (f.emergency === 'radio-failure') return '\u26a0 NORDO';
-  if (f.emergency) return '\u26a0 EMERGENCY';
-  if (f.military) return 'MILITARY';
-  if (f.rare) return 'RARE AIRCRAFT';
-  return '';
+  if (f.emergency === "hijack") return "\u26a0 HIJACK";
+  if (f.emergency === "radio-failure") return "\u26a0 NORDO";
+  if (f.emergency) return "\u26a0 EMERGENCY";
+  if (f.military) return "MILITARY";
+  if (f.rare) return "RARE AIRCRAFT";
+  return "";
 }
 
 // Turn an ISO 3166-1 alpha-2 country code (e.g. "GB") into its flag emoji by
 // mapping each letter to its regional-indicator symbol. Returns '' for
 // anything that isn't a valid two-letter code.
 function flagEmoji(iso) {
-  if (typeof iso !== 'string' || iso.length !== 2) return '';
+  if (typeof iso !== "string" || iso.length !== 2) return "";
   const code = iso.toUpperCase();
-  if (!/^[A-Z]{2}$/.test(code)) return '';
+  if (!/^[A-Z]{2}$/.test(code)) return "";
   const base = 0x1f1e6; // regional indicator 'A'
   return String.fromCodePoint(
     base + (code.charCodeAt(0) - 65),
@@ -79,7 +131,8 @@ function flagEmoji(iso) {
   );
 }
 
-const FONT_STACK = "'Share Tech Mono', ui-monospace, SFMono-Regular, Menlo, monospace";
+const FONT_STACK =
+  "'Share Tech Mono', ui-monospace, SFMono-Regular, Menlo, monospace";
 const LABEL_FONT = `11px ${FONT_STACK}`;
 const LABEL_FONT_BOLD = `bold 11px ${FONT_STACK}`;
 // Smaller font for the route connector arrow so it reads as a thin link
@@ -105,9 +158,32 @@ function fontForLine(l) {
 // Corporate suffixes/abbreviations that should stay fully upper-cased when we
 // title-case an operator name (e.g. "acme leasing llc" -> "Acme Leasing LLC").
 const OPERATOR_ACRONYMS = new Set([
-  'LLC', 'INC', 'LTD', 'PLC', 'LLP', 'LP', 'PTY', 'PTE', 'CO', 'CORP',
-  'DAC', 'AG', 'SA', 'SAS', 'NV', 'BV', 'AB', 'AS', 'ASA', 'OY', 'KG',
-  'DBA', 'USA', 'UK', 'US', 'UAE',
+  "LLC",
+  "INC",
+  "LTD",
+  "PLC",
+  "LLP",
+  "LP",
+  "PTY",
+  "PTE",
+  "CO",
+  "CORP",
+  "DAC",
+  "AG",
+  "SA",
+  "SAS",
+  "NV",
+  "BV",
+  "AB",
+  "AS",
+  "ASA",
+  "OY",
+  "KG",
+  "DBA",
+  "USA",
+  "UK",
+  "US",
+  "UAE",
 ]);
 
 // Raw operator/owner strings from airplanes.live arrive in mixed casing, often
@@ -118,11 +194,11 @@ function formatOperator(name) {
     .toLowerCase()
     .split(/\s+/)
     .map((word) => {
-      const bare = word.replace(/[.,]/g, '');
+      const bare = word.replace(/[.,]/g, "");
       if (OPERATOR_ACRONYMS.has(bare.toUpperCase())) return word.toUpperCase();
       return word.charAt(0).toUpperCase() + word.slice(1);
     })
-    .join(' ');
+    .join(" ");
 }
 
 // Format one end of a route as "<flag> City (CODE)" so the place name reads
@@ -130,7 +206,7 @@ function formatOperator(name) {
 // flag) when we don't have a city name or a valid country code.
 function formatAirport(ap) {
   const flag = flagEmoji(ap.countryIso);
-  const code = ap.iata || ap.icao || '???';
+  const code = ap.iata || ap.icao || "???";
   const place = ap.municipality || ap.name;
   const label = place ? `${place} (${code})` : code;
   return flag ? `${flag} ${label}` : label;
@@ -151,13 +227,14 @@ const LEVEL_FLIGHT_FPM = 100;
 // Format altitude with a climb/descent indicator, e.g. "33,000 ft \u25b2".
 // Returns '' when we have no altitude to show.
 function formatAltitude(altFt, verticalRateFpm) {
-  if (typeof altFt !== 'number') return '';
-  let arrow = '';
-  if (typeof verticalRateFpm === 'number') {
-    if (verticalRateFpm > LEVEL_FLIGHT_FPM) arrow = ' \u25b2'; // climbing
-    else if (verticalRateFpm < -LEVEL_FLIGHT_FPM) arrow = ' \u25bc'; // descending
+  if (typeof altFt !== "number") return "";
+  let arrow = "";
+  if (typeof verticalRateFpm === "number") {
+    if (verticalRateFpm > LEVEL_FLIGHT_FPM)
+      arrow = " \u25b2"; // climbing
+    else if (verticalRateFpm < -LEVEL_FLIGHT_FPM) arrow = " \u25bc"; // descending
   }
-  return `${altFt.toLocaleString('en-US')} ft${arrow}`;
+  return `${altFt.toLocaleString("en-US")} ft${arrow}`;
 }
 
 // ---- Screen-reader speech ------------------------------------------------
@@ -170,43 +247,57 @@ function formatAltitude(altFt, verticalRateFpm) {
 
 // 16-point compass names indexed by bearing (0 = North, clockwise).
 const COMPASS_16 = [
-  'north', 'north-northeast', 'northeast', 'east-northeast',
-  'east', 'east-southeast', 'southeast', 'south-southeast',
-  'south', 'south-southwest', 'southwest', 'west-southwest',
-  'west', 'west-northwest', 'northwest', 'north-northwest',
+  "north",
+  "north-northeast",
+  "northeast",
+  "east-northeast",
+  "east",
+  "east-southeast",
+  "southeast",
+  "south-southeast",
+  "south",
+  "south-southwest",
+  "southwest",
+  "west-southwest",
+  "west",
+  "west-northwest",
+  "northwest",
+  "north-northwest",
 ];
 
 // Turn a bearing/track in degrees into a spoken compass direction.
 function compassDir(deg) {
-  if (typeof deg !== 'number' || Number.isNaN(deg)) return '';
+  if (typeof deg !== "number" || Number.isNaN(deg)) return "";
   const i = Math.round(deg / 22.5);
   return COMPASS_16[((i % 16) + 16) % 16];
 }
 
 // Human-readable size bucket; 'medium' is left unspoken to keep sentences short.
-const SIZE_SPEECH = { light: 'light aircraft', heavy: 'heavy aircraft' };
+const SIZE_SPEECH = { light: "light aircraft", heavy: "heavy aircraft" };
 
 // Altitude phrase with a spoken climb/descent state, e.g.
 // "at 33,000 feet, climbing". Returns '' when altitude is unknown.
 function altitudeSpeech(altFt, verticalRateFpm) {
-  if (typeof altFt !== 'number') return '';
-  let motion = '';
-  if (typeof verticalRateFpm === 'number') {
-    if (verticalRateFpm > LEVEL_FLIGHT_FPM) motion = ', climbing';
-    else if (verticalRateFpm < -LEVEL_FLIGHT_FPM) motion = ', descending';
+  if (typeof altFt !== "number") return "";
+  let motion = "";
+  if (typeof verticalRateFpm === "number") {
+    if (verticalRateFpm > LEVEL_FLIGHT_FPM) motion = ", climbing";
+    else if (verticalRateFpm < -LEVEL_FLIGHT_FPM) motion = ", descending";
   }
-  return `at ${altFt.toLocaleString('en-US')} feet${motion}`;
+  return `at ${altFt.toLocaleString("en-US")} feet${motion}`;
 }
 
 // One end of a route as spoken text, e.g. "London (LHR), United Kingdom".
 // Skips the flag emoji used on the visual card (screen readers announce those
 // awkwardly) and prefers a readable place name plus airport code.
 function airportSpeech(ap) {
-  if (!ap) return '';
-  const code = ap.iata || ap.icao || '';
-  const place = ap.municipality || ap.name || code || 'unknown location';
-  const country = ap.countryName ? `, ${ap.countryName}` : '';
-  return code && place !== code ? `${place} (${code})${country}` : `${place}${country}`;
+  if (!ap) return "";
+  const code = ap.iata || ap.icao || "";
+  const place = ap.municipality || ap.name || code || "unknown location";
+  const country = ap.countryName ? `, ${ap.countryName}` : "";
+  return code && place !== code
+    ? `${place} (${code})${country}`
+    : `${place}${country}`;
 }
 
 // Build the full spoken description of a contact. Fields are omitted when
@@ -216,10 +307,12 @@ export function describeAircraft(b) {
 
   // Identity: prefer "<airline> flight <callsign>", falling back through the
   // callsign, registration, and finally the raw ADS-B hex.
-  const callsign = (b.callsign || '').trim();
+  const callsign = (b.callsign || "").trim();
   // Prefer an explicit airline name from the route; otherwise use the
   // operator/owner from the positions feed (the route API gives only a code).
-  const airlineName = (b.route && b.route.airline) || (b.operator ? formatOperator(b.operator) : '');
+  const airlineName =
+    (b.route && b.route.airline) ||
+    (b.operator ? formatOperator(b.operator) : "");
   if (airlineName && callsign) {
     parts.push(`${airlineName} flight ${callsign}`);
   } else if (callsign) {
@@ -227,20 +320,22 @@ export function describeAircraft(b) {
   } else if (b.registration) {
     parts.push(`Aircraft ${b.registration}`);
   } else {
-    parts.push(`Aircraft ${(b.hex || '').toUpperCase()}`);
+    parts.push(`Aircraft ${(b.hex || "").toUpperCase()}`);
   }
 
   // Noteworthy status, spoken up front so it isn't buried mid-sentence.
   const f = b.flags || {};
-  if (f.emergency === 'hijack') parts.push('squawking hijack');
-  else if (f.emergency === 'radio-failure') parts.push('squawking radio failure');
-  else if (f.emergency) parts.push('squawking emergency');
-  if (f.military) parts.push('military');
-  else if (f.rare) parts.push('rare aircraft');
+  if (f.emergency === "hijack") parts.push("squawking hijack");
+  else if (f.emergency === "radio-failure")
+    parts.push("squawking radio failure");
+  else if (f.emergency) parts.push("squawking emergency");
+  if (f.military) parts.push("military");
+  else if (f.rare) parts.push("rare aircraft");
 
-  // Type / size.
+  // Type / size. For a helicopter, "helicopter" is more useful than a size
+  // bucket, so it replaces the size descriptor.
   const model = b.model || b.type;
-  const size = SIZE_SPEECH[b.sizeClass];
+  const size = b.isRotor ? "helicopter" : SIZE_SPEECH[b.sizeClass];
   if (model && size) parts.push(`${model}, ${size}`);
   else if (model) parts.push(model);
   else if (size) parts.push(size);
@@ -249,44 +344,75 @@ export function describeAircraft(b) {
   if (alt) parts.push(alt);
 
   // Polar position relative to the radar center.
-  if (typeof b.distanceNm === 'number' && typeof b.bearingDeg === 'number') {
-    const dist = b.distanceNm < 10 ? b.distanceNm.toFixed(1) : String(Math.round(b.distanceNm));
+  if (typeof b.distanceNm === "number" && typeof b.bearingDeg === "number") {
+    const dist =
+      b.distanceNm < 10
+        ? b.distanceNm.toFixed(1)
+        : String(Math.round(b.distanceNm));
     const dir = compassDir(b.bearingDeg);
     parts.push(`${dist} nautical miles to the ${dir}`);
   }
 
-  if (typeof b.trackDeg === 'number') parts.push(`heading ${compassDir(b.trackDeg)}`);
-  if (typeof b.groundSpeedKt === 'number') parts.push(`ground speed ${Math.round(b.groundSpeedKt)} knots`);
+  if (typeof b.trackDeg === "number")
+    parts.push(`heading ${compassDir(b.trackDeg)}`);
+  if (typeof b.groundSpeedKt === "number")
+    parts.push(`ground speed ${Math.round(b.groundSpeedKt)} knots`);
 
   // Route when known, otherwise the operator so the description isn't bare.
   if (b.route && b.route.origin && b.route.destination) {
-    parts.push(`travelling from ${airportSpeech(b.route.origin)} to ${airportSpeech(b.route.destination)}`);
+    parts.push(
+      `travelling from ${airportSpeech(b.route.origin)} to ${airportSpeech(b.route.destination)}`,
+    );
   } else if (b.operator) {
     parts.push(`operated by ${formatOperator(b.operator)}`);
   }
 
-  return `${parts.join(', ')}.`;
+  return `${parts.join(", ")}.`;
 }
 
 export class Radar {
-  constructor(canvas, { rangeNm = 100, sweepPeriodSec = 8, persistenceSec = 6, labelCanvas = null, onAppear = null, onPing = null } = {}) {
+  constructor(
+    canvas,
+    {
+      rangeNm = 100,
+      sweepPeriodSec = 8,
+      persistenceSec = 6,
+      labelCanvas = null,
+      onAppear = null,
+      onPing = null,
+      onFocusChange = null,
+    } = {},
+  ) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
+    this.ctx = canvas.getContext("2d");
     // Optional separate canvas for the info cards. It lives above the circular
     // CRT mask and its overlays so cards are never clipped or dimmed. Falls
     // back to drawing labels on the main canvas when not provided.
     this.labelCanvas = labelCanvas;
-    this.lctx = labelCanvas ? labelCanvas.getContext('2d') : null;
+    this.lctx = labelCanvas ? labelCanvas.getContext("2d") : null;
     this.rangeNm = rangeNm;
     this.sweepPeriodSec = sweepPeriodSec;
     this.persistenceSec = persistenceSec;
     // Called once, with the blip, the first time a contact appears on the scope
     // (i.e. the sweep flares it after its data is ready). Used to feed the
     // screen-reader live region so appearances are announced.
-    this.onAppear = typeof onAppear === 'function' ? onAppear : null;
+    this.onAppear = typeof onAppear === "function" ? onAppear : null;
     // Called with the blip each time the sweep passes over a ready contact.
     // Drives the opt-in radar "ping" sound effect.
-    this.onPing = typeof onPing === 'function' ? onPing : null;
+    this.onPing = typeof onPing === "function" ? onPing : null;
+    // Called with the focused blip when the user taps a contact to focus it,
+    // and with null when focus is cleared (exit button, tapping empty scope,
+    // or the contact leaving range). Drives the focus-mode UI in the page.
+    this.onFocusChange =
+      typeof onFocusChange === "function" ? onFocusChange : null;
+
+    // Hex of the contact the user has "locked on". When set, only that contact
+    // is drawn (everything else is hidden) and a bearing needle points to it.
+    this.focusedHex = null;
+
+    // Expected poll cadence (ms), used to time segment lerps when we don't yet
+    // have two fixes. Updated by main.js when range or poll delay changes.
+    this.expectedPollMs = CONFIG.pollIntervalMs;
 
     /** @type {Map<string, object>} keyed by aircraft hex */
     this.blips = new Map();
@@ -307,36 +433,181 @@ export class Radar {
     // (which is what made scrolling janky while lots of contacts were lit).
     this.running = false;
     this._looping = false; // is a rAF currently scheduled/executing?
-    this._docVisible = document.visibilityState !== 'hidden';
+    this._docVisible = document.visibilityState !== "hidden";
     this._onScreen = true; // corrected immediately by the IntersectionObserver
     // Shared 0..1 oscillator used to pulse special contacts in unison.
     this.pulse = 0;
 
     this._resize = this._resize.bind(this);
     this._frame = this._frame.bind(this);
-    window.addEventListener('resize', this._resize);
+    window.addEventListener("resize", this._resize);
     this._resize();
 
     // Pause when the tab is hidden.
     this._onVisibility = () => {
-      this._docVisible = document.visibilityState !== 'hidden';
+      this._docVisible = document.visibilityState !== "hidden";
       this._maybeRun();
     };
-    document.addEventListener('visibilitychange', this._onVisibility);
+    document.addEventListener("visibilitychange", this._onVisibility);
 
     // Pause when the scope is scrolled off screen. Falls back to always-on
     // when IntersectionObserver isn't available.
-    if (typeof IntersectionObserver === 'function') {
+    if (typeof IntersectionObserver === "function") {
       this._io = new IntersectionObserver((entries) => {
         this._onScreen = entries.some((e) => e.isIntersecting);
         this._maybeRun();
       });
       this._io.observe(this.canvas);
     }
+
+    // Tap/click a contact to focus it; tap empty space to exit. A hover pass
+    // swaps the cursor to a pointer over a contact so it's obvious blips are
+    // interactive.
+    this._onClick = this._onClick.bind(this);
+    this._onMove = this._onMove.bind(this);
+    this.canvas.style.cursor = "crosshair";
+    this.canvas.addEventListener("click", this._onClick);
+    this.canvas.addEventListener("mousemove", this._onMove);
   }
 
   setRange(nm) {
     this.rangeNm = nm;
+  }
+
+  /** Hint the expected poll interval so segment lerps time correctly. */
+  setExpectedPollInterval(ms) {
+    if (typeof ms === "number" && ms > 0) this.expectedPollMs = ms;
+  }
+
+  // Display position for drawing / hit-testing (interpolated when enabled).
+  _displayPos(b) {
+    if (!b) return { d: 0, bearing: 0 };
+    return {
+      d: b.displayDistanceNm ?? b.distanceNm,
+      bearing: b.displayBearingDeg ?? b.bearingDeg,
+    };
+  }
+
+  // Seed or advance interpolation state when a polled fix arrives.
+  _seedInterpolation(existing, a, now) {
+    const d = a.distanceNm;
+    const brg = a.bearingDeg;
+    if (!existing) {
+      return {
+        fixDistanceNm: d,
+        fixBearingDeg: brg,
+        fixAtMs: now,
+        prevDistanceNm: d,
+        prevBearingDeg: brg,
+        prevFixAtMs: now,
+        displayDistanceNm: d,
+        displayBearingDeg: brg,
+      };
+    }
+    const hadFix =
+      typeof existing.fixDistanceNm === "number" &&
+      typeof existing.fixBearingDeg === "number";
+    const moved =
+      hadFix &&
+      (existing.fixDistanceNm !== d || existing.fixBearingDeg !== brg);
+    const state = {
+      fixDistanceNm: d,
+      fixBearingDeg: brg,
+      fixAtMs: now,
+      displayDistanceNm: existing.displayDistanceNm ?? d,
+      displayBearingDeg: existing.displayBearingDeg ?? brg,
+    };
+    if (moved) {
+      state.prevDistanceNm = existing.fixDistanceNm;
+      state.prevBearingDeg = existing.fixBearingDeg;
+      state.prevFixAtMs = existing.fixAtMs ?? now;
+    } else {
+      state.prevDistanceNm = existing.prevDistanceNm ?? d;
+      state.prevBearingDeg = existing.prevBearingDeg ?? brg;
+      state.prevFixAtMs = existing.prevFixAtMs ?? now;
+    }
+    return state;
+  }
+
+  // Per-frame visual position: segment lerp between fixes, then dead reckoning.
+  _updateInterpolatedPositions(dt) {
+    if (!interpolationActive()) {
+      for (const b of this.blips.values()) {
+        b.displayDistanceNm = b.fixDistanceNm ?? b.distanceNm;
+        b.displayBearingDeg = b.fixBearingDeg ?? b.bearingDeg;
+      }
+      return;
+    }
+
+    const now = performance.now();
+    const maxExtrap = CONFIG.interpolationMaxExtrapolateSec;
+    const tau = CONFIG.interpolationCorrectionTauSec;
+    const strength = Math.min(
+      1,
+      Math.max(0, CONFIG.interpolationStrength ?? 1),
+    );
+    const ease = tau > 0 ? 1 - Math.exp(-dt / tau) : 1;
+
+    for (const b of this.blips.values()) {
+      const fixD = b.fixDistanceNm ?? b.distanceNm;
+      const fixB = b.fixBearingDeg ?? b.bearingDeg;
+      const fixAt = b.fixAtMs ?? now;
+      const prevD = b.prevDistanceNm ?? fixD;
+      const prevB = b.prevBearingDeg ?? fixB;
+      const prevAt = b.prevFixAtMs ?? fixAt;
+
+      let targetD = fixD;
+      let targetB = fixB;
+
+      const segMs = fixAt - prevAt;
+      const segSec = segMs > 50 ? segMs / 1000 : this.expectedPollMs / 1000;
+      const moved = prevD !== fixD || prevB !== fixB;
+
+      if (moved && segMs > 50) {
+        const t = Math.min(1, (now - prevAt) / 1000 / segSec);
+        if (t < 1) {
+          targetD = prevD + (fixD - prevD) * t;
+          targetB = lerpAngle(prevB, fixB, t);
+        } else {
+          const extrapSec = Math.min(
+            maxExtrap,
+            Math.max(0, (now - fixAt) / 1000),
+          );
+          const adv = advancePolar(
+            fixD,
+            fixB,
+            b.trackDeg,
+            b.groundSpeedKt,
+            extrapSec,
+          );
+          targetD = adv.distanceNm;
+          targetB = adv.bearingDeg;
+        }
+      } else {
+        const extrapSec = Math.min(maxExtrap, Math.max(0, (now - fixAt) / 1000));
+        const adv = advancePolar(
+          fixD,
+          fixB,
+          b.trackDeg,
+          b.groundSpeedKt,
+          extrapSec,
+        );
+        targetD = adv.distanceNm;
+        targetB = adv.bearingDeg;
+      }
+
+      // Pull the target back toward the last polled fix so motion stays
+      // stepped and radar-like rather than a continuous glide.
+      if (strength < 1) {
+        targetD = fixD + (targetD - fixD) * strength;
+        targetB = lerpAngle(fixB, targetB, strength);
+      }
+
+      const dispD = b.displayDistanceNm ?? fixD;
+      const dispB = b.displayBearingDeg ?? fixB;
+      b.displayDistanceNm = dispD + (targetD - dispD) * ease;
+      b.displayBearingDeg = lerpAngle(dispB, targetB, ease);
+    }
   }
 
   /**
@@ -358,6 +629,96 @@ export class Radar {
     this.blips.clear();
   }
 
+  // ---- Focus mode --------------------------------------------------------
+  // Lock the scope onto a single contact: everything else is hidden and a
+  // bearing needle points to it, so the user can track one aircraft. Focus is
+  // released automatically once the contact leaves range (see _frame).
+
+  /** The currently focused blip, or null when not in focus mode. */
+  get focused() {
+    return this.focusedHex != null
+      ? this.blips.get(this.focusedHex) || null
+      : null;
+  }
+
+  /** Focus a contact by hex. No-op if the contact isn't currently tracked. */
+  focus(hex) {
+    const b = this.blips.get(hex);
+    if (!b || this.focusedHex === hex) return;
+    this.focusedHex = hex;
+    this._emitFocus(b);
+  }
+
+  /** Leave focus mode. Safe to call when not focused. */
+  clearFocus() {
+    if (this.focusedHex == null) return;
+    this.focusedHex = null;
+    this._emitFocus(null);
+  }
+
+  _emitFocus(b) {
+    if (!this.onFocusChange) return;
+    try {
+      this.onFocusChange(b);
+    } catch {
+      /* never let a listener break the render loop */
+    }
+  }
+
+  // Map a client (mouse/touch) coordinate to the canvas's logical coordinate
+  // space (CSS pixels, matching `this.size`), independent of DPR scaling.
+  _clientToCanvas(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * this.size;
+    const y = ((clientY - rect.top) / rect.height) * this.size;
+    return { x, y };
+  }
+
+  // Return the ready contact nearest to a canvas coordinate within a small
+  // tap radius, or null. Uses the same polar->cartesian mapping as _drawBlips
+  // so the hit target lines up with what's drawn.
+  _blipAt(clientX, clientY) {
+    const { x, y } = this._clientToCanvas(clientX, clientY);
+    const cx = this.size / 2;
+    const cy = this.size / 2;
+    const R = this.size / 2 - 22;
+    const HIT_R = 20; // generous so small blips are easy to tap
+    let best = null;
+    let bestD2 = HIT_R * HIT_R;
+    for (const b of this.blips.values()) {
+      if (!this._isReady(b)) continue;
+      const { d, bearing } = this._displayPos(b);
+      const rr = Math.min(1, Math.max(0, d / this.rangeNm)) * R;
+      const rad = bearing * DEG;
+      const bx = cx + Math.sin(rad) * rr;
+      const by = cy - Math.cos(rad) * rr;
+      const d2 = (bx - x) ** 2 + (by - y) ** 2;
+      if (d2 <= bestD2) {
+        bestD2 = d2;
+        best = b;
+      }
+    }
+    return best;
+  }
+
+  _onClick(e) {
+    const b = this._blipAt(e.clientX, e.clientY);
+    // Tapping the already-focused contact toggles focus back off; tapping a
+    // different contact switches to it; tapping empty scope exits.
+    if (b && b.hex === this.focusedHex) this.clearFocus();
+    else if (b) this.focus(b.hex);
+    else this.clearFocus();
+  }
+
+  _onMove(e) {
+    const b = this._blipAt(e.clientX, e.clientY);
+    this.canvas.style.cursor = b
+      ? "pointer"
+      : this.focusedHex != null
+        ? "default"
+        : "crosshair";
+  }
+
   /**
    * Merge a fresh list of aircraft into the blip set, preserving each blip's
    * current phosphor intensity so updates don't cause a visual reset.
@@ -368,8 +729,10 @@ export class Radar {
       if (a.distanceNm == null || a.bearingDeg == null) continue;
       if (a.distanceNm > this.rangeNm) continue;
       const existing = this.blips.get(a.hex);
+      const interp = this._seedInterpolation(existing, a, now);
       this.blips.set(a.hex, {
         ...a,
+        ...interp,
         intensity: existing ? existing.intensity : 0,
         labelAlpha: existing ? existing.labelAlpha : 0,
         // Rolling history of plotted positions (polar, relative to center) for
@@ -399,7 +762,8 @@ export class Radar {
   // the scope exactly the way the blip itself is plotted, and skips repeats so
   // a plane holding position doesn't pile up identical points.
   _extendTrail(existing, a) {
-    const trail = existing && Array.isArray(existing.trail) ? existing.trail.slice() : [];
+    const trail =
+      existing && Array.isArray(existing.trail) ? existing.trail.slice() : [];
     const last = trail[trail.length - 1];
     if (!last || last.d !== a.distanceNm || last.b !== a.bearingDeg) {
       trail.push({ d: a.distanceNm, b: a.bearingDeg });
@@ -471,8 +835,17 @@ export class Radar {
     this.pulse = 0.5 + 0.5 * Math.sin((ts / 1000) * TAU * 0.8);
 
     this.prevSweepAngle = this.sweepAngle;
-    this.sweepAngle = (this.sweepAngle + (TAU / this.sweepPeriodSec) * dt) % TAU;
+    this.sweepAngle =
+      (this.sweepAngle + (TAU / this.sweepPeriodSec) * dt) % TAU;
 
+    // Drop focus the moment the locked contact leaves the scope: it's been
+    // pruned (out of range / stale) or has drifted beyond the outer ring.
+    if (this.focusedHex != null) {
+      const f = this.blips.get(this.focusedHex);
+      if (!f || f.distanceNm > this.rangeNm) this.clearFocus();
+    }
+
+    this._updateInterpolatedPositions(dt);
     this._pingCrossed();
     this._decay(dt);
     this._draw();
@@ -493,7 +866,8 @@ export class Radar {
     const wrapped = to < from; // sweep crossed the 0 (North) seam
     for (const b of this.blips.values()) {
       if (!this._isReady(b)) continue;
-      const ang = (b.bearingDeg * DEG) % TAU;
+      const { bearing } = this._displayPos(b);
+      const ang = (bearing * DEG) % TAU;
       const crossed = wrapped
         ? ang > from || ang <= to
         : ang > from && ang <= to;
@@ -501,8 +875,12 @@ export class Radar {
         b.intensity = 1;
         b.labelAlpha = 1;
         // The sweep just illuminated a contact: ping (opt-in SFX). Guarded by
-        // a try/catch so a listener can never break the render loop.
-        if (this.onPing) {
+        // a try/catch so a listener can never break the render loop. In focus
+        // mode only the locked contact pings, so hidden traffic stays silent.
+        if (
+          this.onPing &&
+          (this.focusedHex == null || b.hex === this.focusedHex)
+        ) {
           try {
             this.onPing(b);
           } catch {
@@ -528,6 +906,13 @@ export class Radar {
   _decay(dt) {
     const k = dt / this.persistenceSec;
     for (const b of this.blips.values()) {
+      // The focused contact stays fully lit (blip + label) between sweeps so it
+      // never fades out while the user is tracking it.
+      if (this.focusedHex === b.hex) {
+        b.intensity = 1;
+        b.labelAlpha = 1;
+        continue;
+      }
       // Special contacts never fade all the way out: they hold a floor glow
       // (and keep their label up) so they stay conspicuous and pulse between
       // sweeps. Ordinary traffic decays to nothing as before.
@@ -554,6 +939,7 @@ export class Radar {
     this._drawGrid(ctx, cx, cy, R);
     this._drawAirports(ctx, cx, cy, R);
     this._drawSweep(ctx, cx, cy, R);
+    this._drawFocus(ctx, cx, cy, R);
     this._drawBlips(ctx, cx, cy, R);
     this._drawCenter(ctx, cx, cy);
 
@@ -578,8 +964,8 @@ export class Radar {
     let g = this._bgGrad;
     if (!g) {
       g = ctx.createRadialGradient(cx, cy, R * 0.05, cx, cy, R);
-      g.addColorStop(0, 'rgba(9, 40, 20, 0.95)');
-      g.addColorStop(1, 'rgba(3, 15, 8, 0.98)');
+      g.addColorStop(0, "rgba(9, 40, 20, 0.95)");
+      g.addColorStop(1, "rgba(3, 15, 8, 0.98)");
       this._bgGrad = g;
     }
     ctx.beginPath();
@@ -589,12 +975,12 @@ export class Radar {
   }
 
   _drawGrid(ctx, cx, cy, R) {
-    ctx.strokeStyle = 'rgba(0, 255, 120, 0.36)';
-    ctx.fillStyle = 'rgba(0, 255, 120, 0.65)';
+    ctx.strokeStyle = "rgba(0, 255, 120, 0.36)";
+    ctx.fillStyle = "rgba(0, 255, 120, 0.65)";
     ctx.lineWidth = 1;
     ctx.font = `11px ${FONT_STACK}`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
 
     // Concentric range rings (4 rings) with nm labels.
     const rings = 4;
@@ -611,7 +997,7 @@ export class Radar {
     ctx.globalAlpha = 1;
 
     // Cardinal spokes.
-    ctx.strokeStyle = 'rgba(0, 255, 120, 0.24)';
+    ctx.strokeStyle = "rgba(0, 255, 120, 0.24)";
     for (let a = 0; a < 360; a += 30) {
       const rad = a * DEG;
       ctx.beginPath();
@@ -621,10 +1007,15 @@ export class Radar {
     }
 
     // Compass labels.
-    ctx.fillStyle = 'rgba(0, 255, 120, 0.8)';
+    ctx.fillStyle = "rgba(0, 255, 120, 0.8)";
     ctx.font = `bold 13px ${FONT_STACK}`;
-    ctx.textAlign = 'center';
-    const marks = [['N', 0], ['E', 90], ['S', 180], ['W', 270]];
+    ctx.textAlign = "center";
+    const marks = [
+      ["N", 0],
+      ["E", 90],
+      ["S", 180],
+      ["W", 270],
+    ];
     for (const [label, deg] of marks) {
       const rad = deg * DEG;
       const lx = cx + Math.sin(rad) * (R + 12);
@@ -640,6 +1031,8 @@ export class Radar {
   // the sweep wedge glides over it like a real PPI scope. Deliberately
   // low-contrast so it never competes with the aircraft blips.
   _drawAirports(ctx, cx, cy, R) {
+    // Hidden in focus mode so nothing competes with the tracked contact.
+    if (this.focusedHex != null) return;
     const list = this.airports;
     if (!list || list.length === 0) return;
 
@@ -651,13 +1044,17 @@ export class Radar {
     const maxR = cx - 3;
 
     ctx.save();
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
     ctx.font = `9px ${FONT_STACK}`;
 
     for (let i = 0; i < list.length; i++) {
       const ap = list[i];
-      if (typeof ap.distanceNm !== 'number' || typeof ap.bearingDeg !== 'number') continue;
+      if (
+        typeof ap.distanceNm !== "number" ||
+        typeof ap.bearingDeg !== "number"
+      )
+        continue;
       // Un-clamped radius so airports past the range sit beyond the outer ring.
       const rr = Math.max(0, ap.distanceNm / this.rangeNm) * R;
       if (rr > maxR) continue; // too far outside to show without clipping
@@ -666,7 +1063,7 @@ export class Radar {
       const y = cy - Math.cos(rad) * rr;
 
       const outside = ap.distanceNm > this.rangeNm;
-      const large = ap.kind === 'L';
+      const large = ap.kind === "L";
       const iconR = large ? 4.5 : 3.2;
       // Outside-range airports are dimmer so they read as "just off the scope".
       const alpha = (large ? 0.4 : 0.26) * (outside ? 0.6 : 1);
@@ -721,8 +1118,8 @@ export class Radar {
     const ex = cx + Math.sin(this.sweepAngle) * R;
     const ey = cy - Math.cos(this.sweepAngle) * R;
     const grad = ctx.createLinearGradient(cx, cy, ex, ey);
-    grad.addColorStop(0, 'rgba(0, 255, 120, 0.1)');
-    grad.addColorStop(1, 'rgba(120, 255, 180, 0.9)');
+    grad.addColorStop(0, "rgba(0, 255, 120, 0.1)");
+    grad.addColorStop(1, "rgba(120, 255, 180, 0.9)");
     ctx.strokeStyle = grad;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -731,17 +1128,171 @@ export class Radar {
     ctx.stroke();
   }
 
+  // Focus-mode overlay: a bright bearing needle from the center out to the
+  // outer ring pointing at the locked contact, a dashed ring at its current
+  // distance, and a bearing readout at the tip. Drawn beneath the blip so the
+  // aircraft icon and its reticle sit on top.
+  _drawFocus(ctx, cx, cy, R) {
+    const b = this.focused;
+    if (!b) return;
+    const { d, bearing } = this._displayPos(b);
+    if (typeof bearing !== "number") return;
+
+    // The expected flight path (origin behind, destination ahead) sits beneath
+    // the bearing needle and the blip.
+    this._drawFocusRoute(ctx, cx, cy, R);
+
+    const rad = bearing * DEG;
+    const dirX = Math.sin(rad);
+    const dirY = -Math.cos(rad);
+    const tipX = cx + dirX * R;
+    const tipY = cy + dirY * R;
+    const accent = [150, 255, 190];
+
+    ctx.save();
+
+    // Dashed range ring at the contact's current distance.
+    const rr = Math.min(1, Math.max(0, d / this.rangeNm)) * R;
+    ctx.setLineDash([4, 5]);
+    ctx.strokeStyle = rgba(accent, 0.3);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rr, 0, TAU);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Bearing needle with a soft phosphor bloom.
+    ctx.strokeStyle = rgba(accent, 0.85);
+    ctx.lineWidth = 2;
+    ctx.shadowColor = rgba(accent, 0.8);
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(tipX, tipY);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Arrowhead at the outer ring.
+    const ah = 9;
+    const perpX = -dirY;
+    const perpY = dirX;
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(
+      tipX - dirX * ah + perpX * ah * 0.5,
+      tipY - dirY * ah + perpY * ah * 0.5,
+    );
+    ctx.lineTo(
+      tipX - dirX * ah - perpX * ah * 0.5,
+      tipY - dirY * ah - perpY * ah * 0.5,
+    );
+    ctx.closePath();
+    ctx.fillStyle = rgba([180, 255, 210], 0.95);
+    ctx.fill();
+
+    // Bearing readout just outside the ring, e.g. "045\u00b0".
+    const brg = Math.round(((bearing % 360) + 360) % 360) % 360;
+    ctx.font = `bold 12px ${FONT_STACK}`;
+    ctx.fillStyle = rgba([180, 255, 210], 0.95);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(
+      `${String(brg).padStart(3, "0")}\u00b0`,
+      cx + dirX * (R + 15),
+      cy + dirY * (R + 15),
+    );
+
+    ctx.restore();
+  }
+
+  // Subtle course line for the focused contact: a best-guess continuation ahead
+  // (a dashed ray along its current ground track to the scope edge). Clipped to
+  // the tube and drawn dim so it reads as a faint course trace rather than
+  // competing with the blip.
+  _drawFocusRoute(ctx, cx, cy, R) {
+    const b = this.focused;
+    if (!b) return;
+    const { d, bearing } = this._displayPos(b);
+    if (typeof bearing !== "number") return;
+
+    const rr = Math.min(1, Math.max(0, d / this.rangeNm)) * R;
+    const rad = bearing * DEG;
+    const px = cx + Math.sin(rad) * rr;
+    const py = cy - Math.cos(rad) * rr;
+    const accent = [150, 255, 190];
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, TAU);
+    ctx.clip();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    // Best guess ahead: dashed ray from the plane along its ground track.
+    if (typeof b.trackDeg === "number") {
+      const dx = Math.sin(b.trackDeg * DEG);
+      const dy = -Math.cos(b.trackDeg * DEG);
+      const fx = px - cx;
+      const fy = py - cy;
+      const bq = 2 * (fx * dx + fy * dy);
+      const cq = fx * fx + fy * fy - R * R;
+      const disc = bq * bq - 4 * cq;
+      if (disc >= 0) {
+        const t = (-bq + Math.sqrt(disc)) / 2;
+        if (t > 0) {
+          ctx.setLineDash([4, 5]);
+          ctx.strokeStyle = rgba(accent, 0.28);
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.moveTo(px, py);
+          ctx.lineTo(px + dx * t, py + dy * t);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+    }
+
+    ctx.restore();
+  }
+
+  // Corner-bracket targeting reticle drawn around the focused contact.
+  _drawReticle(ctx, x, y, sizeFactor = 1) {
+    const r = 15 * sizeFactor; // half-size of the bracket box
+    const arm = 5; // length of each bracket leg
+    ctx.save();
+    ctx.strokeStyle = rgba([180, 255, 210], 0.9);
+    ctx.lineWidth = 1.5;
+    ctx.shadowColor = rgba([150, 255, 190], 0.7);
+    ctx.shadowBlur = 6;
+    for (const [sx, sy] of [
+      [-1, -1],
+      [1, -1],
+      [1, 1],
+      [-1, 1],
+    ]) {
+      ctx.beginPath();
+      ctx.moveTo(x + sx * r, y + sy * r - sy * arm);
+      ctx.lineTo(x + sx * r, y + sy * r);
+      ctx.lineTo(x + sx * r - sx * arm, y + sy * r);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   _drawBlips(ctx, cx, cy, R) {
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
     for (const b of this.blips.values()) {
       // Hold the blip back until its route lookup has settled, so it never
       // appears with a placeholder dash that fills in a moment later.
       if (!this._isReady(b)) continue;
+      // In focus mode every other contact is hidden.
+      if (this.focusedHex != null && b.hex !== this.focusedHex) continue;
+      const { d, bearing } = this._displayPos(b);
       // Plot position uses the fraction of the current range, so a contact
       // always sits at the correct ring regardless of the depth cue below.
-      const rr = Math.min(1, Math.max(0, b.distanceNm / this.rangeNm)) * R;
-      const rad = b.bearingDeg * DEG;
+      const rr = Math.min(1, Math.max(0, d / this.rangeNm)) * R;
+      const rad = bearing * DEG;
       const x = cx + Math.sin(rad) * rr;
       const y = cy - Math.cos(rad) * rr;
 
@@ -752,7 +1303,7 @@ export class Radar {
       // 1 and nothing is dimmed/resized. A real PPI scope keeps blips the same
       // size but distant echoes are weaker, so the dimming is the authentic cue
       // and the size falloff is a subtle stylistic depth hint.
-      const depthFrac = Math.min(1, Math.max(0, b.distanceNm / DEPTH_FULL_NM));
+      const depthFrac = Math.min(1, Math.max(0, d / DEPTH_FULL_NM));
       const sizeFactor = 1 - 0.25 * depthFrac;
       const distDim = 1 - 0.3 * depthFrac;
 
@@ -780,7 +1331,21 @@ export class Radar {
       ctx.fillStyle = halo;
       ctx.fill();
 
-      this._drawPlane(ctx, x, y, b.trackDeg, glow, sizeFactor, b.sizeClass, rgb);
+      this._drawPlane(
+        ctx,
+        x,
+        y,
+        b.trackDeg,
+        glow,
+        sizeFactor,
+        b.sizeClass,
+        rgb,
+        b.isRotor,
+      );
+
+      // A targeting reticle brackets the focused contact so the lock-on reads
+      // clearly even against the empty scope.
+      if (b.hex === this.focusedHex) this._drawReticle(ctx, x, y, sizeFactor);
 
       // Label: flight number + route, fading with labelAlpha. When a dedicated
       // overlay layer exists, cards are drawn there instead (see _drawLabels)
@@ -797,18 +1362,20 @@ export class Radar {
   // another card. This is "good enough" (greedy, a handful of candidate
   // offsets) rather than an exact layout solver.
   _drawLabels(ctx, cx, cy, R) {
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
 
     // Collect the visible blips along with their plotted plane position and the
     // measured card size, so placement can reason about all of them at once.
     const items = [];
     for (const b of this.blips.values()) {
       if (!this._isReady(b)) continue;
+      if (this.focusedHex != null && b.hex !== this.focusedHex) continue;
       if (b.intensity <= 0.02) continue;
       if (b.labelAlpha <= 0.03) continue;
-      const rr = (b.distanceNm / this.rangeNm) * R;
-      const rad = b.bearingDeg * DEG;
+      const { d, bearing } = this._displayPos(b);
+      const rr = (d / this.rangeNm) * R;
+      const rad = bearing * DEG;
       const x = cx + Math.sin(rad) * rr;
       const y = cy - Math.cos(rad) * rr;
       const { lines, w, h } = this._measureLabel(ctx, b);
@@ -838,7 +1405,17 @@ export class Radar {
     }
 
     for (const it of items) {
-      this._drawLabelBox(ctx, it.b, it.rect.x, it.rect.y, it.w, it.h, it.lines, it.x, it.y);
+      this._drawLabelBox(
+        ctx,
+        it.b,
+        it.rect.x,
+        it.rect.y,
+        it.w,
+        it.h,
+        it.lines,
+        it.x,
+        it.y,
+      );
     }
   }
 
@@ -910,15 +1487,39 @@ export class Radar {
   _drawTrail(ctx, cx, cy, R, b, glow, rgb) {
     const trail = b.trail;
     if (!trail || trail.length < 2 || glow <= 0.02) return;
-    const n = trail.length;
 
     ctx.save();
     // Phosphor emits light, so overlapping glow should add up and bloom.
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
 
     const points = trail.map((p) => this._project(cx, cy, R, p.d, p.b));
+    // Bridge the polled trail toward the display position (scaled by strength
+    // so the tail doesn't outrun a subtly interpolated blip).
+    const strength = Math.min(
+      1,
+      Math.max(0, CONFIG.interpolationStrength ?? 1),
+    );
+    const { d, bearing } = this._displayPos(b);
+    const last = trail[trail.length - 1];
+    if (
+      strength > 0.05 &&
+      last &&
+      (last.d !== d || last.b !== bearing)
+    ) {
+      const bridgeD = last.d + (d - last.d) * strength;
+      const bridgeB = lerpAngle(last.b, bearing, strength);
+      if (bridgeD !== last.d || bridgeB !== last.b) {
+        points.push(this._project(cx, cy, R, bridgeD, bridgeB));
+      }
+    }
+    const n = points.length;
+    if (n < 2) {
+      ctx.restore();
+      return;
+    }
+
     for (let i = 1; i < n; i++) {
       const ageFrac = i / (n - 1); // 0 (oldest) .. 1 (newest, at the plane)
       // Quadratic decay: brightness drops off quickly behind the blip.
@@ -961,14 +1562,28 @@ export class Radar {
   // its ground track (degrees clockwise from North). Brightens with `glow`.
   // `sizeClass` ('light' | 'medium' | 'heavy') selects the icon shape and a
   // base size so a jumbo reads bigger than a light aircraft at a glance.
-  _drawPlane(ctx, x, y, trackDeg, glow, sizeFactor = 1, sizeClass = 'medium', rgb = PHOSPHOR_RGB) {
+  // `isRotor` swaps in a helicopter symbol regardless of size bucket.
+  _drawPlane(
+    ctx,
+    x,
+    y,
+    trackDeg,
+    glow,
+    sizeFactor = 1,
+    sizeClass = "medium",
+    rgb = PHOSPHOR_RGB,
+    isRotor = false,
+  ) {
     // Fade the plane entirely with the phosphor glow so it vanishes between
     // sweeps rather than lingering as a static dot. `sizeFactor` shrinks
     // contacts that are further from the center for a subtle depth cue.
     const alpha = glow;
     // Per-class base scale layered on top of the glow/distance scaling so the
     // three buckets stay distinguishable regardless of range or brightness.
-    const classScale = sizeClass === 'heavy' ? 1.4 : sizeClass === 'light' ? 0.62 : 1;
+    // Helicopters ignore the size bucket and use one consistent scale.
+    const classScale = isRotor
+      ? 0.9
+      : sizeClass === "heavy" ? 1.4 : sizeClass === "light" ? 0.62 : 1;
     const scale = (0.85 + glow * 0.35) * sizeFactor * classScale;
 
     ctx.save();
@@ -978,9 +1593,17 @@ export class Radar {
     if (trackDeg != null) ctx.rotate(trackDeg * DEG);
     ctx.scale(scale, scale);
 
+    if (isRotor) {
+      // A helicopter draws its own body + rotor (mixed fill/stroke), so it
+      // handles alpha itself and returns rather than sharing the plane fill.
+      this._heliShape(ctx, alpha, glow, rgb);
+      ctx.restore();
+      return;
+    }
+
     // Light aircraft get a straight-wing prop-plane silhouette; medium/heavy
     // share the swept-wing jet outline (size does the rest of the talking).
-    if (sizeClass === 'light') this._lightPath(ctx);
+    if (sizeClass === "light") this._lightPath(ctx);
     else this._jetPath(ctx);
 
     ctx.fillStyle = rgba(rgb, alpha);
@@ -994,6 +1617,40 @@ export class Radar {
       ctx.stroke();
     }
     ctx.restore();
+  }
+
+  // Top-down helicopter symbol, pointing North (up), drawn in the already
+  // translated/rotated/scaled context set up by `_drawPlane`. A filled fuselage
+  // with a tail boom and tail rotor, overlaid by two diagonally-crossed main
+  // rotor blades. The diagonal blades read unmistakably as a helicopter and
+  // never look like the horizontal wings of a fixed-wing icon.
+  _heliShape(ctx, alpha, glow, rgb) {
+    // Fuselage: a rounded body with a tail boom running aft to a small tail
+    // rotor, built as one filled path.
+    ctx.beginPath();
+    ctx.ellipse(0, -1.5, 2.4, 4.6, 0, 0, TAU); // cabin/fuselage
+    ctx.rect(-0.7, 2.5, 1.4, 6); // tail boom
+    ctx.rect(-2.6, 8, 5.2, 1.2); // tail rotor
+    ctx.fillStyle = rgba(rgb, alpha);
+    ctx.fill();
+
+    // Main rotor: two blades crossed on the diagonal, drawn as bright strokes
+    // with round caps so they read as spinning blades over the cabin.
+    const edge = rgb.map((c) => Math.min(255, c + 50));
+    ctx.strokeStyle = rgba(edge, Math.max(0.35, 0.85 * glow));
+    ctx.lineWidth = 1.1;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(-6.5, -6.5);
+    ctx.lineTo(6.5, 6.5);
+    ctx.moveTo(6.5, -6.5);
+    ctx.lineTo(-6.5, 6.5);
+    ctx.stroke();
+    // Rotor hub: a small bright dot at the centre of rotation.
+    ctx.beginPath();
+    ctx.arc(0, -1.5, 1, 0, TAU);
+    ctx.fillStyle = rgba(edge, Math.max(0.4, 0.9 * glow));
+    ctx.fill();
   }
 
   // Swept-wing airliner/jet silhouette, pointing North (up). Used for medium
@@ -1066,7 +1723,9 @@ export class Radar {
     // Name the operator: an explicit airline name from the route if present,
     // otherwise the operator/owner from the positions feed (the route API only
     // returns a code, e.g. "BAW"). Shown when known so bare cards stay compact.
-    const airlineName = (b.route && b.route.airline) || (b.operator ? formatOperator(b.operator) : '');
+    const airlineName =
+      (b.route && b.route.airline) ||
+      (b.operator ? formatOperator(b.operator) : "");
     if (airlineName) {
       lines.push({ text: airlineName });
     }
@@ -1074,11 +1733,11 @@ export class Radar {
     // fall back to the longer human-readable model only when it's missing.
     const model = b.type || b.model;
     const altLine = formatAltitude(b.altFt, b.verticalRateFpm);
-    const summary = [model, altLine].filter(Boolean).join(' \u00b7 ');
+    const summary = [model, altLine].filter(Boolean).join(" \u00b7 ");
     if (summary) lines.push({ text: summary });
     if (b.route) {
       lines.push({ text: formatAirport(b.route.origin) });
-      lines.push({ text: '\u2193', center: true, connector: true });
+      lines.push({ text: "\u2193", center: true, connector: true });
       lines.push({ text: formatAirport(b.route.destination) });
     }
 
@@ -1090,7 +1749,9 @@ export class Radar {
     // every visible card on every animation frame. The card text only changes
     // when a poll brings new data, so cache the measured width/height against a
     // signature of the line contents and re-measure only when that changes.
-    const sig = lines.map((l) => `${l.connector ? 'c' : l.bold ? 'b' : 'n'}:${l.text}`).join('|');
+    const sig = lines
+      .map((l) => `${l.connector ? "c" : l.bold ? "b" : "n"}:${l.text}`)
+      .join("|");
     if (b._labelSig === sig) {
       return { lines, w: b._labelW, h: b._labelH };
     }
@@ -1146,7 +1807,7 @@ export class Radar {
     // Every line is vertically centered within its own slot so the leftover
     // leading is split evenly top and bottom, keeping the gaps between all
     // lines (and around the connector arrow) uniform.
-    ctx.textBaseline = 'middle';
+    ctx.textBaseline = "middle";
     let y = ly + CARD_PAD_Y;
     for (const l of lines) {
       ctx.font = fontForLine(l);
@@ -1188,7 +1849,7 @@ export class Radar {
   _drawCenter(ctx, cx, cy) {
     ctx.beginPath();
     ctx.arc(cx, cy, 3, 0, TAU);
-    ctx.fillStyle = 'rgba(180, 255, 210, 0.9)';
+    ctx.fillStyle = "rgba(180, 255, 210, 0.9)";
     ctx.fill();
   }
 

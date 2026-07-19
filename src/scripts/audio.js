@@ -18,6 +18,9 @@ export class RadarAudio {
     // Throttle pings so a dense scope doesn't turn into a machine-gun rattle.
     this._lastPingAt = 0;
     this._minPingGapMs = 110;
+    // How hard a contact can be pushed to one side. Just under 1 so even a
+    // dead-abeam ping keeps a whisper in the far ear rather than going silent.
+    this._maxPan = 0.9;
   }
 
   // Create (or resume) the AudioContext. Returns null when Web Audio is
@@ -50,14 +53,27 @@ export class RadarAudio {
   // A crisp air-traffic-scope "blip": a bright, tight tone with a snappy attack
   // and a short decay, plus just a whisper of echo for a sense of space (not
   // the deep, cavernous sonar ring). Cheap enough to fire on every sweep-cross.
-  ping() {
+  //
+  // `bearingDeg` (compass bearing of the contact, 0 = North, 90 = East) places
+  // the blip in the stereo field so a plane at 3 o'clock sounds off to the
+  // right. Omitted / non-finite bearings play dead centre.
+  ping(bearingDeg) {
     if (this.muted) return;
     const ctx = this._ensure();
     if (!ctx) return;
     const now = performance.now();
     if (now - this._lastPingAt < this._minPingGapMs) return;
     this._lastPingAt = now;
-    this._blip(ctx.currentTime);
+    this._blip(ctx.currentTime, this._panFor(bearingDeg));
+  }
+
+  // Map a compass bearing to a stereo pan position in [-1, +1]. East (90 deg)
+  // is hard right, West (270 deg) is hard left, North/South are centred — i.e.
+  // sin(bearing) — matching how the contact sits on the scope relative to you.
+  // Capped just short of a fully silent ear so panned blips still feel natural.
+  _panFor(bearingDeg) {
+    if (typeof bearingDeg !== 'number' || !Number.isFinite(bearingDeg)) return 0;
+    return Math.sin(bearingDeg * Math.PI / 180) * this._maxPan;
   }
 
   // The overhead / zenith alert: the exact same blip, but fired several times
@@ -79,10 +95,17 @@ export class RadarAudio {
   }
 
   // Build one blip tone starting at AudioContext time `t`. Shared by the single
-  // sweep-cross ping and the rapid overhead burst.
-  _blip(t) {
+  // sweep-cross ping and the rapid overhead burst. `pan` places the whole blip
+  // (dry + echo) in the stereo field, -1 (hard left) .. +1 (hard right).
+  _blip(t, pan = 0) {
     const ctx = this.ctx;
     if (!ctx) return;
+
+    // A per-blip stereo panner sits between the blip and the master so this
+    // contact's bearing decides which ear it lands in. Falls back to routing
+    // straight to the master where StereoPanner isn't available.
+    const panner = this._makePanner(pan);
+    const out = panner || this.master;
 
     // Bandpass keeps the tone tight and "electronic". Its centre frequency
     // tracks the oscillator's doppler glide so the resonance follows the pitch.
@@ -93,12 +116,13 @@ export class RadarAudio {
 
     // A single, extremely short echo tap — so tight (~18 ms) it fuses into the
     // dry blip as one sound rather than a perceptible double ping. Just adds a
-    // touch of body.
+    // touch of body. Routed through the same panner so the echo stays on the
+    // contact's side rather than smearing back to centre.
     const delay = ctx.createDelay(0.1);
     delay.delayTime.value = 0.018;
     const echoGain = ctx.createGain();
     echoGain.gain.value = 0.14;
-    delay.connect(echoGain).connect(this.master);
+    delay.connect(echoGain).connect(out);
 
     // The dry blip. A gentle doppler arc — pitch eases up as the sweep reaches
     // the contact, then glides down as it passes — plus a soft swell-in attack
@@ -116,12 +140,26 @@ export class RadarAudio {
     gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.72);
 
     osc.connect(bp).connect(gain);
-    // Dry signal straight to the master, plus a single tap into the echo.
-    gain.connect(this.master);
+    // Dry signal to the (panned) output, plus a single tap into the echo.
+    gain.connect(out);
     gain.connect(delay);
+    // Panner feeds the master; skip when we fell back to routing to master.
+    if (panner) panner.connect(this.master);
 
     osc.start(t);
     osc.stop(t + 0.77);
+  }
+
+  // Create a StereoPannerNode set to `pan` (-1..+1). Returns null when the
+  // node is unsupported or the pan is effectively centre, in which case the
+  // caller just routes to the master unpanned.
+  _makePanner(pan) {
+    const ctx = this.ctx;
+    if (!ctx || !ctx.createStereoPanner) return null;
+    if (!pan) return null;
+    const panner = ctx.createStereoPanner();
+    panner.pan.value = Math.max(-1, Math.min(1, pan));
+    return panner;
   }
 
   // A soft, bell-like two-note rise used to confirm sound has been enabled. A

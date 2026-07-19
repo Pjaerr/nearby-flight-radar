@@ -76,4 +76,17 @@ export const CONFIG = {
   // Flag the "last updated" readout as stale once this many poll intervals
   // have elapsed without a successful refresh.
   staleAfterIntervals: 2.5,
+
+  // ---- Blip interpolation (visual-only) ------------------------------------
+  // Smooth motion between ADS-B poll ticks by lerping fixes and dead-reckoning
+  // with ground speed + track. Polled positions are unchanged for alerts and
+  // the passport; only the scope display is interpolated.
+  interpolationEnabled: true,
+  // How much glide to apply between fixes (0 = snap like raw ADS-B, 1 = full
+  // smooth). Kept low so contacts still read as discrete radar returns.
+  interpolationStrength: 0.18,
+  // Stop extrapolating beyond this many seconds after the latest fix.
+  interpolationMaxExtrapolateSec: 1.5,
+  // Exponential ease time constant (seconds) toward each frame's target.
+  interpolationCorrectionTauSec: 0.5,
 };

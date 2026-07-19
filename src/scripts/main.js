@@ -88,14 +88,18 @@ const els = {
   tabCountries: document.getElementById('tab-countries'),
   tabAircraft: document.getElementById('tab-aircraft'),
   tabAirlines: document.getElementById('tab-airlines'),
+  tabRoutes: document.getElementById('tab-routes'),
   tabBadges: document.getElementById('tab-badges'),
   tabStats: document.getElementById('tab-stats'),
   aircraftHead: document.getElementById('aircraft-head'),
   aircraftBody: document.getElementById('aircraft-body'),
   aircraftGroupBy: document.getElementById('aircraft-groupby'),
   airlinesBody: document.getElementById('airlines-body'),
+  routesBody: document.getElementById('routes-body'),
   badgesGrid: document.getElementById('badges-grid'),
   statsBody: document.getElementById('stats-body'),
+  // Live "badge earned" toast host, overlaid at the top of the scope.
+  badgeToasts: document.getElementById('badge-toasts'),
   // Nearest-airport readout in the HUD.
   wxLine: document.getElementById('wx-line'),
   wxCode: document.getElementById('wx-code'),
@@ -104,6 +108,13 @@ const els = {
   srLive: document.getElementById('sr-live'),
   srList: document.getElementById('sr-aircraft-list'),
   srEmpty: document.getElementById('sr-aircraft-empty'),
+  // Focus-mode banner (shown while a single contact is locked on).
+  focusBar: document.getElementById('focus-bar'),
+  focusPhoto: document.getElementById('focus-photo'),
+  focusTitle: document.getElementById('focus-title'),
+  focusSub: document.getElementById('focus-sub'),
+  focusStats: document.getElementById('focus-stats'),
+  focusExit: document.getElementById('focus-exit'),
 };
 
 // ---- Screen-reader announcements ------------------------------------------
@@ -173,6 +184,190 @@ function updateAircraftList() {
   }
 }
 
+// ---- Focus mode -----------------------------------------------------------
+// Reflect the radar's focus state in the on-scope banner. Called with the
+// locked contact, or null when focus is released (exit button, tapping empty
+// space, Escape, or the contact leaving range).
+function updateFocusUI(b) {
+  if (!els.focusBar) return;
+  if (!b) {
+    els.focusBar.hidden = true;
+    if (els.focusPhoto) {
+      els.focusPhoto.hidden = true;
+      els.focusPhoto.innerHTML = '';
+    }
+    return;
+  }
+  focusMisses = 0;
+  const title = (b.callsign || b.registration || b.hex || 'contact').toUpperCase().trim();
+  if (els.focusTitle) els.focusTitle.textContent = title;
+  if (els.focusSub) els.focusSub.textContent = focusSubtitle(b);
+  renderFocusStats(b);
+  els.focusBar.hidden = false;
+  loadFocusPhoto(b, title);
+}
+
+// Refresh the focus banner's live text (title, route, telemetry) from the
+// current blip without touching the photo, so the readout tracks each poll.
+function refreshFocusTelemetry() {
+  if (radar.focusedHex == null) return;
+  const b = radar.blips.get(radar.focusedHex);
+  if (!b) return;
+  const title = (b.callsign || b.registration || b.hex || 'contact').toUpperCase().trim();
+  if (els.focusTitle) els.focusTitle.textContent = title;
+  if (els.focusSub) els.focusSub.textContent = focusSubtitle(b);
+  renderFocusStats(b);
+}
+
+// 8-point compass label for a bearing/track in degrees.
+const COMPASS_8 = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+function compass8(deg) {
+  if (typeof deg !== 'number' || Number.isNaN(deg)) return '';
+  return COMPASS_8[Math.round(deg / 45) % 8];
+}
+
+// Build the compact telemetry chips shown in the focus banner: altitude (with a
+// climb/descent arrow), ground speed, heading, distance, registration/type, and
+// squawk. Only fields we actually have are rendered.
+function renderFocusStats(b) {
+  const host = els.focusStats;
+  if (!host) return;
+  host.innerHTML = '';
+  const stats = [];
+
+  if (typeof b.altFt === 'number') {
+    let arrow = '';
+    if (typeof b.verticalRateFpm === 'number') {
+      if (b.verticalRateFpm > 100) arrow = ' \u25b2';
+      else if (b.verticalRateFpm < -100) arrow = ' \u25bc';
+    }
+    stats.push(['ALT', `${b.altFt.toLocaleString('en-US')} ft${arrow}`]);
+  }
+  if (typeof b.groundSpeedKt === 'number') {
+    stats.push(['SPD', `${Math.round(b.groundSpeedKt)} kt`]);
+  }
+  if (typeof b.trackDeg === 'number') {
+    const hdg = Math.round(((b.trackDeg % 360) + 360) % 360) % 360;
+    const c = compass8(b.trackDeg);
+    stats.push(['HDG', `${String(hdg).padStart(3, '0')}\u00b0${c ? ` ${c}` : ''}`]);
+  }
+  if (typeof b.distanceNm === 'number' || typeof b.displayDistanceNm === 'number') {
+    const distNm = b.displayDistanceNm ?? b.distanceNm;
+    const d = distNm < 10 ? distNm.toFixed(1) : String(Math.round(distNm));
+    stats.push(['DIST', `${d} nm`]);
+  }
+  if (b.registration && b.callsign && b.registration.toUpperCase() !== b.callsign.toUpperCase()) {
+    stats.push(['REG', b.registration.toUpperCase()]);
+  }
+  const typeCode = b.type || b.model;
+  if (typeCode) stats.push(['TYPE', typeCode.toUpperCase()]);
+  if (b.squawk) stats.push(['SQK', b.squawk]);
+
+  for (const [k, v] of stats) {
+    const chip = document.createElement('span');
+    chip.className = 'focus-stat';
+    const ks = document.createElement('span');
+    ks.className = 'focus-stat-k';
+    ks.textContent = k;
+    const vs = document.createElement('span');
+    vs.className = 'focus-stat-v';
+    vs.textContent = v;
+    chip.append(ks, vs);
+    host.appendChild(chip);
+  }
+}
+
+// Fill the focus banner's thumbnail with the contact's photo, expandable via
+// the shared Planespotters lightbox (same as the passport logbook). Looks up by
+// registration when known, else by ADS-B hex. Guarded against a stale async
+// result painting after focus moved to a different contact (or cleared).
+function loadFocusPhoto(b, label) {
+  const holder = els.focusPhoto;
+  if (!holder) return;
+  const hex = b.hex;
+  const byHex = !b.registration;
+  const id = b.registration || b.hex;
+  holder.innerHTML = '';
+  if (!id) {
+    holder.hidden = true;
+    return;
+  }
+
+  const paint = (photo) => {
+    // Ignore a late fetch if focus has since changed.
+    if (radar.focusedHex !== hex) return;
+    holder.classList.remove('is-loading');
+    if (!photo || !photo.thumb) {
+      holder.hidden = true;
+      holder.innerHTML = '';
+      return;
+    }
+    holder.hidden = false;
+    holder.innerHTML = '';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'focus-photo-btn';
+    btn.setAttribute('aria-label', `Enlarge photo of ${label}`);
+    const img = document.createElement('img');
+    img.className = 'focus-photo-img';
+    img.src = photo.thumb.src;
+    img.alt = '';
+    img.decoding = 'async';
+    btn.appendChild(img);
+    btn.addEventListener('click', () => openPhotoLightbox(photo, label));
+    holder.appendChild(btn);
+  };
+
+  const cached = cachedAircraftPhoto(id, { byHex });
+  if (cached !== undefined) {
+    holder.hidden = cached ? false : true;
+    paint(cached);
+    return;
+  }
+  // Nothing cached yet: show the loading shimmer and fetch.
+  holder.hidden = false;
+  holder.classList.add('is-loading');
+  fetchAircraftPhoto(id, { byHex }).then(paint);
+}
+
+// A short secondary line for the focus banner: the route when known, else the
+// operator, else the aircraft type.
+function focusSubtitle(b) {
+  if (b.route && b.route.origin && b.route.destination) {
+    const o = airportCode(b.route.origin) || '???';
+    const d = airportCode(b.route.destination) || '???';
+    return `${o} \u2192 ${d}`;
+  }
+  if (b.route && b.route.airline) return b.route.airline;
+  if (b.operator) return b.operator;
+  return b.type || b.model || '';
+}
+
+function wireFocus() {
+  if (els.focusExit) {
+    els.focusExit.addEventListener('click', () => radar.clearFocus());
+  }
+  // While focused, a click anywhere except the focus banner (or the photo
+  // lightbox it opens) exits focus mode. Scope clicks are left to the radar's
+  // own handler, which focuses a tapped blip or exits on empty space.
+  document.addEventListener('click', (e) => {
+    if (radar.focusedHex == null) return;
+    const t = e.target;
+    if (els.canvas && els.canvas.contains(t)) return; // handled by the radar
+    if (els.focusBar && els.focusBar.contains(t)) return;
+    // Interacting with the photo lightbox (including its close button, which
+    // sets hidden=true before this handler runs) must not drop focus.
+    if (els.photoLightbox && els.photoLightbox.contains(t)) return;
+    radar.clearFocus();
+  });
+  // Escape is the universal "get me out" gesture.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && radar.focusedHex != null) {
+      radar.clearFocus();
+    }
+  });
+}
+
 // Opt-in sound. Muted unless the user previously enabled it.
 function loadSoundPref() {
   try {
@@ -203,9 +398,14 @@ const radar = new Radar(els.canvas, {
     // idle so the render frame stays smooth).
     queueSighting(b);
   },
-  // Radar ping as the sweep crosses a contact (no-op while muted).
-  onPing: () => audio.ping(),
+  // Radar ping as the sweep crosses a contact (no-op while muted). Pass the
+  // contact's bearing so the blip pans to where it sits on the scope.
+  onPing: (b) => audio.ping(b?.displayBearingDeg ?? b?.bearingDeg),
+  // Toggle the focus-mode banner as the user locks onto / releases a contact
+  // (also fires when a focused contact leaves range and focus auto-clears).
+  onFocusChange: (b) => updateFocusUI(b),
 });
+radar.setExpectedPollInterval(pollIntervalForRange(currentRange));
 radar.start();
 els.range.textContent = `${currentRange} nm`;
 
@@ -569,6 +769,67 @@ function continentBadgeIdsCompleteAt(isoSet) {
   return ids;
 }
 
+// How long a badge toast lingers before it fades itself out. Kept short so a
+// celebration never sits over the scope for long.
+const BADGE_TOAST_MS = 4200;
+
+// Pop a subtle, self-dismissing "badge earned" toast at the top of the scope.
+// Purely a live flourish — the badge is already recorded in the passport by the
+// time this runs, so it's safe to fire-and-forget.
+function showBadgeToast(b) {
+  const host = els.badgeToasts;
+  if (!host || !b) return;
+
+  const toast = document.createElement('div');
+  toast.className = 'badge-toast';
+
+  const star = document.createElement('span');
+  star.className = 'badge-toast-star';
+  star.textContent = '\u2605';
+
+  const text = document.createElement('div');
+  text.className = 'badge-toast-text';
+  const eyebrow = document.createElement('span');
+  eyebrow.className = 'badge-toast-eyebrow';
+  eyebrow.textContent = 'Badge earned';
+  const name = document.createElement('span');
+  name.className = 'badge-toast-name';
+  name.textContent = b.name;
+  text.appendChild(eyebrow);
+  text.appendChild(name);
+  if (b.detail) {
+    const detail = document.createElement('span');
+    detail.className = 'badge-toast-detail';
+    detail.textContent = b.detail;
+    text.appendChild(detail);
+  }
+
+  toast.appendChild(star);
+  toast.appendChild(text);
+  host.appendChild(toast);
+
+  // Next frame so the enter transition actually plays from the hidden state.
+  requestAnimationFrame(() => toast.classList.add('is-in'));
+
+  let removed = false;
+  const remove = () => {
+    if (removed) return;
+    removed = true;
+    toast.classList.remove('is-in');
+    toast.classList.add('is-out');
+    let done = false;
+    const drop = () => {
+      if (done) return;
+      done = true;
+      toast.remove();
+    };
+    toast.addEventListener('transitionend', drop, { once: true });
+    // Fallback in case the transition never fires (tab hidden, reduced motion).
+    setTimeout(drop, 600);
+  };
+  setTimeout(remove, BADGE_TOAST_MS);
+}
+
 // Reconcile the session badge tally with the current passport. Idempotent:
 // safe to call on every passport change. On the first call it establishes the
 // pre-session baseline; on later calls it records any newly earned badge.
@@ -590,6 +851,9 @@ function syncSessionBadges() {
     if (sessionBadge.earnedIds.has(b.id)) continue;
     sessionBadge.earnedIds.add(b.id);
     sessionBadge.earned.push({ id: b.id, name: b.name, detail: b.detail || '', t: Date.now() });
+    // Baseline earns (established on the first seeded call) never reach here, so
+    // anything landing in `earned` is a genuine live unlock worth celebrating.
+    showBadgeToast(b);
   }
 }
 
@@ -916,6 +1180,7 @@ function closeRangePicker() {
 function applyRange(nm) {
   currentRange = Math.max(1, Math.min(SLIDER_MAX, Math.round(nm)));
   radar.setRange(currentRange);
+  radar.setExpectedPollInterval(pollIntervalForRange(currentRange));
   radar.clear(); // drop contacts outside the new range; poll repopulates
   updateAircraftList();
   els.range.textContent = `${currentRange} nm`;
@@ -1872,6 +2137,144 @@ function renderAirlinesTab() {
   }
 }
 
+// ---- Routes (country pairings) --------------------------------------------
+
+// A readable country name for an ISO code, preferring the name we captured when
+// the country was first logged, falling back to the raw code.
+function countryNameOf(iso) {
+  const e = iso ? passport.countries[iso] : null;
+  return (e && e.n) || iso || '';
+}
+
+// Aggregate every recorded sighting into directed country pairings
+// (origin -> destination) plus per-country origin/destination tallies.
+//
+// Each sighting is stored twice (once under its origin country, once under its
+// destination), so we dedupe on a per-flight signature - the same pattern
+// backfillLogbooks() uses - before counting, and skip endpoints without a
+// known country.
+function buildRoutePairings() {
+  const seen = new Set();
+  const pairs = new Map();   // "GB\u0000FR" -> { fromIso, toIso, count }
+  const origins = new Map(); // iso -> count
+  const dests = new Map();   // iso -> count
+
+  for (const entry of Object.values(passport.countries)) {
+    const flights = Array.isArray(entry.flights) ? entry.flights : [];
+    for (const fl of flights) {
+      const sig = `${fl.t}|${fl.cs}|${fl.reg}|${fl.ty}`;
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      const from = fl.fromIso || '';
+      const to = fl.toIso || '';
+      if (from) origins.set(from, (origins.get(from) || 0) + 1);
+      if (to) dests.set(to, (dests.get(to) || 0) + 1);
+      if (from && to) {
+        const key = `${from}\u0000${to}`;
+        let p = pairs.get(key);
+        if (!p) {
+          p = { fromIso: from, toIso: to, count: 0 };
+          pairs.set(key, p);
+        }
+        p.count += 1;
+      }
+    }
+  }
+
+  const isoList = (map) =>
+    [...map.entries()]
+      .map(([iso, count]) => ({ iso, count }))
+      .sort((a, b) => b.count - a.count || countryNameOf(a.iso).localeCompare(countryNameOf(b.iso)));
+
+  return {
+    pairs: [...pairs.values()].sort(
+      (a, b) =>
+        b.count - a.count ||
+        countryNameOf(a.fromIso).localeCompare(countryNameOf(b.fromIso)) ||
+        countryNameOf(a.toIso).localeCompare(countryNameOf(b.toIso)),
+    ),
+    origins: isoList(origins),
+    dests: isoList(dests),
+  };
+}
+
+// One flagged country label (e.g. flag + "United Kingdom") built via textContent
+// so data-derived names can never inject markup.
+function routeEndpointEl(iso) {
+  const span = document.createElement('span');
+  span.className = 'route-ep';
+  const flag = flagEmoji(iso);
+  span.textContent = `${flag ? `${flag} ` : ''}${countryNameOf(iso)}`;
+  return span;
+}
+
+// A single "row + count" entry used by every routes list.
+function routeRow(endpointsEl, count) {
+  const row = document.createElement('div');
+  row.className = 'route-row';
+  const c = document.createElement('span');
+  c.className = 'route-count';
+  c.textContent = String(count);
+  row.append(endpointsEl, c);
+  return row;
+}
+
+// Render the Routes tab: the busiest directed country pairings, plus which
+// countries flights most often come from and head to.
+function renderRoutesTab() {
+  const body = els.routesBody;
+  if (!body) return;
+  body.innerHTML = '';
+
+  const { pairs, origins, dests } = buildRoutePairings();
+
+  if (!pairs.length && !origins.length && !dests.length) {
+    const empty = document.createElement('div');
+    empty.className = 'session-empty';
+    empty.textContent =
+      'No routes yet. Once flights with known origins and destinations cross your radar, the busiest country pairings will show here.';
+    body.appendChild(empty);
+    return;
+  }
+
+  const addSection = (title, count, rows) => {
+    if (!rows.length) return;
+    const sec = document.createElement('section');
+    sec.className = 'session-section';
+    const h = document.createElement('h3');
+    h.className = 'session-section-title';
+    h.textContent = count == null ? title : `${title} (${count})`;
+    sec.appendChild(h);
+    const list = document.createElement('div');
+    list.className = 'route-list';
+    for (const r of rows) list.appendChild(r);
+    sec.appendChild(list);
+    body.appendChild(sec);
+  };
+
+  // Busiest origin -> destination pairings.
+  const pairRows = pairs.slice(0, 15).map((p) => {
+    const eps = document.createElement('div');
+    eps.className = 'route-endpoints';
+    const arrow = document.createElement('span');
+    arrow.className = 'route-arrow';
+    arrow.textContent = '\u2192';
+    eps.append(routeEndpointEl(p.fromIso), arrow, routeEndpointEl(p.toIso));
+    return routeRow(eps, p.count);
+  });
+  addSection('Top country pairings', pairs.length, pairRows);
+
+  const isoRows = (items) =>
+    items.slice(0, 10).map((it) => {
+      const eps = document.createElement('div');
+      eps.className = 'route-endpoints';
+      eps.appendChild(routeEndpointEl(it.iso));
+      return routeRow(eps, it.count);
+    });
+  addSection('Busiest origins', origins.length, isoRows(origins));
+  addSection('Busiest destinations', dests.length, isoRows(dests));
+}
+
 // ---- Badges ---------------------------------------------------------------
 
 // Derive the full badge set purely from stored data. Each badge is earned or
@@ -2026,7 +2429,7 @@ function computeBadges() {
       name: 'Longest Route',
       earned: !!lr,
       detail: lr ? `${lr.from}\u2192${lr.to} \u00b7 ${Math.round(lr.nm).toLocaleString()} nm` : '',
-      hint: 'See a long-haul route end to end',
+      hint: 'Spot a flight with a known origin and destination \u2014 this tracks the longest airport-to-airport route you\u2019ve seen',
     },
     {
       id: 'longhauler',
@@ -2911,6 +3314,7 @@ const PASSPORT_PANELS = {
   countries: 'tabCountries',
   aircraft: 'tabAircraft',
   airlines: 'tabAirlines',
+  routes: 'tabRoutes',
   badges: 'tabBadges',
   stats: 'tabStats',
 };
@@ -2927,6 +3331,9 @@ function refreshOpenPassportTab() {
       break;
     case 'airlines':
       renderAirlinesTab();
+      break;
+    case 'routes':
+      renderRoutesTab();
       break;
     case 'badges':
       renderBadgesTab();
@@ -3280,6 +3687,7 @@ function makeDemoAircraft(kind) {
     category: '',
     squawk: '',
     sizeClass: 'medium',
+    isRotor: false,
     operator: '',
     route: null,
     flags: { emergency: null, military: false, rare: false },
@@ -3385,6 +3793,21 @@ function makeDemoAircraft(kind) {
         squawk: '7500',
         altFt: 9000,
         flags: { emergency: 'hijack', military: false, rare: false },
+      };
+    case 'helicopter':
+      return {
+        ...base,
+        callsign: 'HLE21',
+        registration: 'G-MEDX',
+        type: 'EC35',
+        model: 'AIRBUS H135',
+        category: 'A7',
+        sizeClass: 'light',
+        isRotor: true,
+        altFt: 1500,
+        groundSpeedKt: 120,
+        distanceNm: 1.4,
+        operator: 'Air Ambulance',
       };
     case 'light':
     default:
@@ -3611,6 +4034,7 @@ async function runPoll() {
   const err = await poll();
   if (!err) {
     pollDelay = pollIntervalForRange(currentRange);
+    radar.setExpectedPollInterval(pollDelay);
   } else {
     // Exponential backoff, floored at the range's normal cadence and capped so
     // we keep checking periodically.
@@ -3636,6 +4060,7 @@ async function runPoll() {
 function restartPolling() {
   clearTimeout(pollTimer);
   pollDelay = pollIntervalForRange(currentRange);
+  radar.setExpectedPollInterval(pollDelay);
   runPoll();
 }
 
@@ -3665,6 +4090,10 @@ function checkOverhead(visible) {
     if (overheadActive.has(a.hex)) continue; // already alerted this pass
     overheadActive.add(a.hex);
 
+    // In focus mode only the locked contact is audible; hidden traffic passing
+    // overhead shouldn't fire the burst.
+    if (radar.focusedHex != null && radar.focusedHex !== a.hex) continue;
+
     audio.overhead();
     // Re-light the blip so the visual matches the audible nudge (reuses the
     // existing sweep-cross flare — deliberately not a new, striking element).
@@ -3680,6 +4109,26 @@ function checkOverhead(visible) {
   for (const hex of overheadActive) {
     if (!seen.has(hex)) overheadActive.delete(hex);
   }
+}
+
+// Consecutive polls the focused contact has been absent from the live in-range
+// set. A short grace tolerates a single missed fix (e.g. a briefly stale
+// position) without exiting, while still releasing focus promptly once the
+// aircraft has genuinely left your range.
+let focusMisses = 0;
+const FOCUS_MAX_MISSES = 2;
+
+function checkFocusStillPresent(visible) {
+  if (radar.focusedHex == null) {
+    focusMisses = 0;
+    return;
+  }
+  const present = visible.some((a) => a.hex === radar.focusedHex);
+  if (present) {
+    focusMisses = 0;
+    return;
+  }
+  if (++focusMisses >= FOCUS_MAX_MISSES) radar.clearFocus();
 }
 
 async function poll() {
@@ -3700,6 +4149,8 @@ async function poll() {
 
     radar.update(visible);
     radar.prune(CONFIG.staleAfterSec);
+    checkFocusStillPresent(visible);
+    refreshFocusTelemetry();
     checkOverhead(visible);
     updateAircraftList();
 
@@ -3759,6 +4210,7 @@ async function poll() {
   wireSound();
   wireWakeLock();
   wireDev();
+  wireFocus();
   // Establish the pre-session badge baseline before any contacts roll in, so
   // only badges earned during this session get celebrated in the panel.
   syncSessionBadges();

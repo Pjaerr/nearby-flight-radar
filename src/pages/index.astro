@@ -171,6 +171,25 @@
           <!-- Info cards render here, above the circular CRT mask and its
                scanline/glare overlays, so they are never clipped or dimmed. -->
           <canvas id="radar-labels" class="label-layer" width="720" height="720" aria-hidden="true"></canvas>
+          <!-- Live "badge earned" toasts. Perch at the top edge of the scope so
+               they celebrate an unlock without covering the sweep, then fade out
+               on their own. Populated by main.js. -->
+          <div id="badge-toasts" class="badge-toasts" aria-live="polite" aria-atomic="false"></div>
+          <!-- Focus-mode banner. Shown while a single contact is locked on;
+               gives an obvious way to leave focus mode. Wired in main.js. -->
+          <div id="focus-bar" class="focus-bar" hidden>
+            <div id="focus-photo" class="focus-photo" hidden></div>
+            <div class="focus-info">
+              <div class="focus-head">
+                <span id="focus-title" class="focus-title"></span>
+                <span id="focus-sub" class="focus-sub"></span>
+              </div>
+              <div id="focus-stats" class="focus-stats"></div>
+            </div>
+            <button id="focus-exit" type="button" class="focus-exit" aria-label="Exit focus mode">
+              <span aria-hidden="true">&times;</span> Exit
+            </button>
+          </div>
         </div>
       </section>
 
@@ -191,6 +210,7 @@
           <button type="button" data-demo="radio">Radio fail 7600</button>
           <button type="button" data-demo="hijack">Hijack 7500</button>
           <button type="button" data-demo="light">Light GA</button>
+          <button type="button" data-demo="helicopter">Helicopter</button>
         </div>
         <div class="dev-buttons">
           <button type="button" data-demo-action="clear">Clear demo</button>
@@ -295,6 +315,7 @@
           <button type="button" class="passport-tab is-active" data-tab="countries" role="tab" aria-selected="true">Countries</button>
           <button type="button" class="passport-tab" data-tab="aircraft" role="tab" aria-selected="false">Aircraft</button>
           <button type="button" class="passport-tab" data-tab="airlines" role="tab" aria-selected="false">Airlines</button>
+          <button type="button" class="passport-tab" data-tab="routes" role="tab" aria-selected="false">Routes</button>
           <button type="button" class="passport-tab" data-tab="badges" role="tab" aria-selected="false">Badges</button>
           <button type="button" class="passport-tab" data-tab="stats" role="tab" aria-selected="false">Session</button>
         </div>
@@ -335,6 +356,13 @@
               </thead>
               <tbody id="airlines-body"></tbody>
             </table>
+          </section>
+
+          <!-- Country pairings: which origin -> destination routes your flights
+               connect most often. -->
+          <section id="tab-routes" class="passport-panel" role="tabpanel" hidden>
+            <p class="modal-hint modal-hint-sticky">The country pairings your flights connect most often &mdash; where they're coming from and heading to.</p>
+            <div id="routes-body" class="routes-body"></div>
           </section>
 
           <!-- Achievements / badges. -->
@@ -1651,6 +1679,212 @@
         text-shadow: 0 0 8px rgba(0, 255, 120, 0.35);
       }
 
+      /* ---- Live "badge earned" toasts ------------------------------------ */
+      /* Stack at the top of the scope, centred, never intercepting clicks so
+         the radar stays fully usable underneath. */
+      /* Focus-mode banner: pinned to the bottom of the viewport so it stays on
+         screen whatever its height, clear of the tracked contact's info card in
+         normal mode (and only lightly overlapping the scope in immersive), with
+         a prominent Exit control so leaving focus mode is always obvious. */
+      .focus-bar {
+        position: fixed;
+        bottom: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 30;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        max-width: 84%;
+        padding: 6px 6px 6px 14px;
+        border-radius: 999px;
+        border: 1px solid rgba(0, 255, 120, 0.5);
+        background: rgba(3, 22, 11, 0.85);
+        box-shadow: 0 0 18px rgba(0, 255, 120, 0.28);
+        backdrop-filter: blur(3px);
+        color: #d6ffe6;
+        font-family: 'Share Tech Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .focus-bar[hidden] { display: none; }
+      /* Aircraft thumbnail on the left of the focus banner. Click to expand via
+         the shared Planespotters lightbox, mirroring the passport logbook. */
+      .focus-photo {
+        flex: none;
+        width: 62px;
+        height: 40px;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid rgba(0, 255, 120, 0.35);
+        background: rgba(0, 20, 10, 0.6);
+      }
+      .focus-photo[hidden] { display: none; }
+      .focus-photo.is-loading {
+        background:
+          linear-gradient(100deg, rgba(0, 255, 120, 0) 30%, rgba(0, 255, 120, 0.12) 50%, rgba(0, 255, 120, 0) 70%)
+          rgba(0, 20, 10, 0.6);
+        background-size: 200% 100%;
+        animation: focus-photo-shimmer 1.1s linear infinite;
+      }
+      @keyframes focus-photo-shimmer {
+        from { background-position: 200% 0; }
+        to { background-position: -200% 0; }
+      }
+      .focus-photo-btn {
+        display: block;
+        width: 100%;
+        height: 100%;
+        padding: 0;
+        border: 0;
+        margin: 0;
+        cursor: zoom-in;
+        background: none;
+      }
+      .focus-photo-img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .focus-info {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+      }
+      .focus-head {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        min-width: 0;
+      }
+      /* Compact live telemetry: altitude, speed, heading, distance, squawk. */
+      .focus-stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 2px 12px;
+        font-size: 10px;
+      }
+      .focus-stats:empty { display: none; }
+      .focus-stat {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 4px;
+        white-space: nowrap;
+      }
+      .focus-stat-k {
+        opacity: 0.5;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .focus-stat-v {
+        color: #eafff2;
+        font-weight: 700;
+        text-shadow: 0 0 6px rgba(0, 255, 120, 0.35);
+      }
+      .focus-title {
+        font-weight: bold;
+        font-size: 14px;
+        white-space: nowrap;
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.5);
+      }
+      .focus-sub {
+        font-size: 11px;
+        opacity: 0.7;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .focus-exit {
+        flex: none;
+        cursor: pointer;
+        border: 1px solid rgba(0, 255, 120, 0.55);
+        background: rgba(0, 255, 120, 0.14);
+        color: #eafff2;
+        border-radius: 999px;
+        padding: 5px 12px;
+        font: inherit;
+        font-size: 12px;
+        line-height: 1;
+        transition: background 0.15s ease;
+      }
+      .focus-exit:hover { background: rgba(0, 255, 120, 0.26); }
+      .focus-exit:focus-visible { outline: 2px solid rgba(0, 255, 120, 0.8); outline-offset: 2px; }
+      .badge-toasts {
+        position: absolute;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 5;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        width: max-content;
+        max-width: 86%;
+        pointer-events: none;
+      }
+      .badge-toast {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        max-width: 100%;
+        padding: 8px 14px;
+        border-radius: 999px;
+        border: 1px solid rgba(0, 255, 120, 0.55);
+        background: rgba(0, 30, 14, 0.82);
+        box-shadow: 0 0 18px rgba(0, 255, 120, 0.25);
+        backdrop-filter: blur(3px);
+        color: #eafff2;
+        opacity: 0;
+        transform: translateY(-10px);
+        transition: opacity 0.32s ease, transform 0.32s ease;
+      }
+      .badge-toast.is-in { opacity: 1; transform: translateY(0); }
+      .badge-toast.is-out { opacity: 0; transform: translateY(-10px); }
+      .badge-toast-star {
+        flex: none;
+        font-size: 18px;
+        line-height: 1;
+        color: #eafff2;
+        text-shadow: 0 0 10px rgba(0, 255, 120, 0.8);
+      }
+      .badge-toast-text {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        min-width: 0;
+      }
+      .badge-toast-eyebrow {
+        font-size: 8px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: #7fe0aa;
+        opacity: 0.8;
+      }
+      .badge-toast-name {
+        font-size: 12px;
+        font-weight: 700;
+        color: #d9ffec;
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.4);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .badge-toast-detail {
+        font-size: 10px;
+        color: #9fe0bd;
+        opacity: 0.85;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .badge-toast,
+        .badge-toast.is-in,
+        .badge-toast.is-out { transform: none; }
+      }
+
       /* ---- Session stats ------------------------------------------------- */
       .stats-body {
         display: flex;
@@ -1721,6 +1955,56 @@
       .session-tag-rare { color: #ffe08a; }
       .session-tag-mil { color: #8ac6ff; }
       .session-tag-emergency { color: #ff8a8a; }
+      /* ---- Routes (country pairings) ------------------------------------- */
+      .routes-body {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        padding: 14px;
+      }
+      .route-list {
+        display: flex;
+        flex-direction: column;
+        border: 1px solid rgba(0, 255, 120, 0.2);
+        border-radius: 8px;
+        overflow: hidden;
+        background: rgba(0, 40, 18, 0.25);
+      }
+      .route-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 14px;
+        border-top: 1px solid rgba(0, 255, 120, 0.12);
+      }
+      .route-row:first-child { border-top: none; }
+      .route-endpoints {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        font-size: 13px;
+        color: #d9ffec;
+      }
+      .route-ep { font-weight: 700; }
+      .route-arrow {
+        opacity: 0.6;
+        color: #9fe0bd;
+      }
+      .route-count {
+        flex: none;
+        min-width: 34px;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 700;
+        color: #baffd7;
+        padding: 3px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(0, 255, 120, 0.3);
+        background: rgba(0, 255, 120, 0.08);
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.4);
+      }
       .session-badges {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
