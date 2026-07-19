@@ -371,6 +371,17 @@
         width: min(88vw, 72vh, 720px);
         aspect-ratio: 1 / 1;
       }
+      /* Circular outer halo drawn behind the (masked) tube, so the green glow
+         keeps its round shape after the mask on .crt clips its own box-shadow. */
+      .crt-wrap::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        border-radius: 50%;
+        pointer-events: none;
+        box-shadow: 0 0 40px rgba(0, 255, 120, 0.25);
+      }
       /* CRT enclosure: holds the radar canvas plus the scanline/glare overlays
          that give it the look of a curved phosphor tube. */
       .crt {
@@ -380,7 +391,17 @@
         border-radius: 50%;
         overflow: hidden;
         isolation: isolate;
-        box-shadow: 0 0 40px rgba(0, 255, 120, 0.25), inset 0 0 60px rgba(0, 255, 120, 0.08);
+        /* Safari/WebKit ignores `overflow: hidden` + `border-radius` for
+           children promoted to their own compositing layer (transform,
+           backface-visibility, mix-blend-mode, animation), letting the rolling
+           bar and scanline overlays leak into the square's corners. A circular
+           mask forces the clip to be applied after compositing, so composited
+           descendants stay inside the tube on every browser. */
+        -webkit-mask-image: radial-gradient(circle closest-side at 50% 50%, #000 99.5%, transparent 100%);
+        mask-image: radial-gradient(circle closest-side at 50% 50%, #000 99.5%, transparent 100%);
+        /* Only the inset glow lives here; the mask above would clip an outer
+           box-shadow. The outer halo is drawn by .crt-wrap::before instead. */
+        box-shadow: inset 0 0 60px rgba(0, 255, 120, 0.08);
       }
       /* Info-card layer: same coordinate space as the radar canvas but placed
          above the circular clip and every CRT overlay, so cards are drawn in
