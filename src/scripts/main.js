@@ -1842,11 +1842,9 @@ function renderPairingDetail(pair) {
   el.innerHTML = '';
 
   const flights = pairingFlights(pair.fromIso, pair.toIso);
+  // No route title here: the highlighted chip already names the pairing.
   const head = document.createElement('div');
   head.className = 'country-detail-head';
-  const title = document.createElement('span');
-  title.className = 'country-detail-title';
-  title.textContent = `${pairEndpointText(pair.fromIso)} \u2192 ${pairEndpointText(pair.toIso)}`;
   const meta = document.createElement('span');
   meta.className = 'country-detail-meta';
   const first = flights.length ? seenLabel(flights[0].t) : '';
@@ -1858,7 +1856,6 @@ function renderPairingDetail(pair) {
   clear.title = 'Clear selection';
   clear.textContent = '\u00d7';
   clear.addEventListener('click', clearCountrySelection);
-  head.appendChild(title);
   head.appendChild(meta);
   head.appendChild(clear);
   el.appendChild(head);

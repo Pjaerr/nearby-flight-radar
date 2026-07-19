@@ -1007,20 +1007,35 @@
         border-color: rgba(0, 255, 120, 0.35);
         text-shadow: 0 0 8px rgba(0, 255, 120, 0.5);
       }
+      /* The body is a fixed-height column; the active panel fills it and owns
+         its own scroll, so shared chrome (header, tabs) and per-tab furniture
+         (like the Countries map) stay pinned instead of scrolling away. */
       .passport-body {
         flex: 1;
-        overflow-y: auto;
         min-height: 0;
-        /* Keep the body's own scroll from chaining out to the page behind. */
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .passport-panel {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        /* Keep a panel's own scroll from chaining out to the page behind. */
         overscroll-behavior: contain;
       }
       .passport-panel[hidden] { display: none; }
+      /* Countries tab: pin the map (and selected-route detail) and let only the
+         day-grouped entries list scroll. */
+      #tab-countries:not([hidden]) {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
       /* Countries notice pinned to the top of the scrolling body so it stays
          visible no matter how far the list is scrolled. */
       .modal-hint-sticky {
-        position: sticky;
-        top: 0;
-        z-index: 5;
+        flex: none;
         margin: 0;
         padding: 10px 14px;
         background: #041a0d;
@@ -1033,6 +1048,7 @@
          the stack; the overlays below are painted on top and ignore pointer
          events so panning/zooming still works. */
       .passport-crt {
+        flex: none;
         position: relative;
         overflow: hidden;
         isolation: isolate;
@@ -1193,10 +1209,14 @@
       .share-native:hover { background: rgba(0, 255, 120, 0.14); filter: none; }
       .share-hint { text-align: center; }
       .passport-list {
+        flex: 1 1 auto;
+        min-height: 140px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
         display: flex;
         flex-direction: column;
         gap: 10px;
-        padding: 6px 14px 4px;
+        padding: 6px 14px 10px;
       }
       .passport-day {
         display: flex;
@@ -1255,8 +1275,15 @@
       }
 
       /* ---- Country detail panel (Countries tab) --------------------------- */
+      /* Pinned below the scrolling entries list. Capped + independently
+         scrollable so a route with many flights can't crowd out the list. */
       .country-detail {
-        padding: 8px 14px 4px;
+        flex: none;
+        max-height: 42%;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        border-top: 1px solid rgba(0, 255, 120, 0.2);
+        padding: 8px 14px 14px;
       }
       .passport-hint {
         margin: 0;
