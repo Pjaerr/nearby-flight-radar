@@ -205,8 +205,11 @@ export function describeAircraft(b) {
   // Identity: prefer "<airline> flight <callsign>", falling back through the
   // callsign, registration, and finally the raw ADS-B hex.
   const callsign = (b.callsign || '').trim();
-  if (b.route && b.route.airline && callsign) {
-    parts.push(`${b.route.airline} flight ${callsign}`);
+  // Prefer an explicit airline name from the route; otherwise use the
+  // operator/owner from the positions feed (the route API gives only a code).
+  const airlineName = (b.route && b.route.airline) || (b.operator ? formatOperator(b.operator) : '');
+  if (airlineName && callsign) {
+    parts.push(`${airlineName} flight ${callsign}`);
   } else if (callsign) {
     parts.push(`Flight ${callsign}`);
   } else if (b.registration) {
@@ -836,11 +839,12 @@ export class Radar {
     // Lead special contacts with a coloured status tag (e.g. "MILITARY").
     const tag = specialTag(b);
     if (tag) lines.unshift({ text: tag, bold: true, tag: true });
-    // Expand the coded callsign into the human-readable airline name when the
-    // route lookup supplied one (e.g. "BAW123" -> "British Airways"). Only
-    // shown when known, so cards without a resolved airline stay compact.
-    if (b.route && b.route.airline) {
-      lines.push({ text: b.route.airline });
+    // Name the operator: an explicit airline name from the route if present,
+    // otherwise the operator/owner from the positions feed (the route API only
+    // returns a code, e.g. "BAW"). Shown when known so bare cards stay compact.
+    const airlineName = (b.route && b.route.airline) || (b.operator ? formatOperator(b.operator) : '');
+    if (airlineName) {
+      lines.push({ text: airlineName });
     }
     // Prefer the short ICAO type code (e.g. "B763") to keep the line narrow;
     // fall back to the longer human-readable model only when it's missing.
@@ -852,9 +856,6 @@ export class Radar {
       lines.push({ text: formatAirport(b.route.origin) });
       lines.push({ text: '\u2193', center: true, connector: true });
       lines.push({ text: formatAirport(b.route.destination) });
-    } else if (b.operator) {
-      // No route known: show the operator/owner so the card isn't bare.
-      lines.push({ text: formatOperator(b.operator) });
     }
 
     for (const l of lines) {

@@ -1236,7 +1236,9 @@ async function poll() {
       }
 
       blip.routePending = true; // guard against refetching every poll
-      lookupRoute(a.callsign).then((route) => {
+      // Pass the live position so the route API can confirm the route is
+      // plausible for this contact (and reject a reused/aliased callsign).
+      lookupRoute(a.callsign, a.lat, a.lon).then((route) => {
         const b = radar.blips.get(a.hex);
         if (!b) return;
         b.route = route;

@@ -1,11 +1,17 @@
 // Data layer. Two keyless, CORS-enabled public APIs:
 //   - airplanes.live  -> live ADS-B positions around a point
-//   - adsbdb.com      -> callsign -> departure/arrival airports
+//   - adsb.lol        -> callsign + position -> plausible route (origin/dest)
 // Both send `Access-Control-Allow-Origin: *`, so the browser calls them
 // directly. No proxy, no API key, no backend.
 
 const POSITIONS_BASE = 'https://api.airplanes.live/v2/point';
-const ROUTE_BASE = 'https://api.adsbdb.com/v0/callsign';
+// Position-aware route lookup. Unlike a callsign-only service, this one takes
+// the aircraft's live lat/lng and only returns a route it considers plausible
+// for that position, so a reused or stale callsign no longer resolves to a
+// route belonging to a completely different flight. Data: vradarserver
+// standing-data via adsb.lol (ODbL). It's a POST endpoint that accepts a batch
+// of planes and returns one route object per plane.
+const ROUTESET_URL = 'https://api.adsb.lol/api/0/routeset';
 
 // ---- Aircraft size classification ----------------------------------------
 // Buckets every contact into a rough physical size so the radar can draw a
@@ -186,10 +192,11 @@ export async function fetchNearbyAircraft(lat, lon, rangeNm) {
 // Cached in an in-memory Map for the session plus localStorage so labels
 // appear instantly across reloads. Both hits and misses are cached with a
 // TTL: a found route is stable for a while, but a "no route" answer must
-// expire so a callsign adsbdb didn't know yet (or one reused by a later
-// flight) gets re-checked instead of being blank forever. Crucially, only a
-// *definitive* miss is cached; a transient failure (rate limit, 5xx, network)
-// is never cached, so it retries on the next sighting.
+// expire so a callsign the route database didn't know yet (or one reused by a
+// later flight) gets re-checked instead of being blank forever. Crucially,
+// only a *definitive* miss ("unknown") is cached; a transient failure (rate
+// limit, 5xx, network) and a position-dependent "not plausible" rejection are
+// never cached, so they retry on the next sighting.
 
 const routeMemory = new Map(); // callsign -> { value: route|null, expires: ms }
 // All cached routes live under one consolidated localStorage entry, an object
@@ -281,9 +288,11 @@ function cacheRoute(callsign, value) {
 
 /**
  * Resolve a callsign to { origin, destination } (each with iata, icao,
- * municipality, name) or null if unknown. Never throws.
+ * municipality, name) or null if unknown. Needs the aircraft's live position
+ * (lat, lon) so the route API can confirm the route is plausible for *this*
+ * contact rather than a different flight sharing the callsign. Never throws.
  */
-export async function lookupRoute(callsign) {
+export async function lookupRoute(callsign, lat, lon) {
   if (!callsign) return null;
 
   const now = Date.now();
@@ -297,27 +306,43 @@ export async function lookupRoute(callsign) {
     return cached.value;
   }
 
+  // The route API needs the aircraft's live position to pick the plausible
+  // route; without a fix there's nothing to disambiguate against, so bail
+  // (without caching) and let a later poll with a position retry.
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
   try {
-    const res = await fetch(`${ROUTE_BASE}/${encodeURIComponent(callsign)}`, {
-      headers: { Accept: 'application/json' },
+    const res = await fetch(ROUTESET_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ planes: [{ callsign, lat, lng: lon }] }),
     });
-    if (!res.ok) {
-      // 404 (unknown callsign) and 400 (malformed callsign) are deterministic
-      // for this callsign, so cache the miss with its short TTL. Anything else
-      // (429 rate limit, 5xx, etc.) is transient: don't cache, retry later.
-      if (res.status === 404 || res.status === 400) cacheRoute(callsign, null);
-      return null;
-    }
+    // 4xx/5xx (bad request, rate limit, server error) are transient here:
+    // don't cache, just retry on the next sighting.
+    if (!res.ok) return null;
     const data = await res.json();
-    const fr = data && data.response && data.response.flightroute;
-    if (!fr || !fr.origin || !fr.destination) {
+    const r = Array.isArray(data) ? data[0] : null;
+
+    // No route on file for this callsign (`airport_codes: "unknown"`). That's a
+    // deterministic answer for the callsign, so cache the miss with its short
+    // TTL rather than re-asking every sighting.
+    if (!r || r.airport_codes === 'unknown' || !Array.isArray(r._airports) || r._airports.length < 2) {
       cacheRoute(callsign, null);
       return null;
     }
+
+    // A route exists but the aircraft isn't near its great-circle corridor:
+    // almost always a reused/aliased callsign pointing at the wrong flight (the
+    // bug this endpoint fixes). Reject it, but *don't* cache \u2014 plausibility is
+    // position-dependent, so a later, correctly-placed sighting should re-check.
+    if (!r.plausible) return null;
+
     const route = {
-      airline: fr.airline ? fr.airline.name : null,
-      origin: pickAirport(fr.origin),
-      destination: pickAirport(fr.destination),
+      // The route API only carries an airline *code*; the human-readable
+      // operator name (from the positions feed) is used at display time.
+      airline: null,
+      origin: pickAirport(r._airports[0]),
+      destination: pickAirport(r._airports[r._airports.length - 1]),
     };
     cacheRoute(callsign, route);
     return route;
@@ -327,16 +352,40 @@ export async function lookupRoute(callsign) {
   }
 }
 
+// One region-name resolver, reused for every airport. Turns an ISO 3166-1
+// alpha-2 code into an English country name (e.g. "GB" -> "United Kingdom")
+// for the passport and screen-reader text; the route API only gives the code.
+const regionNames = (() => {
+  try {
+    return new Intl.DisplayNames(['en'], { type: 'region' });
+  } catch {
+    return null;
+  }
+})();
+
+function countryNameFromIso(iso) {
+  if (!regionNames || !/^[A-Z]{2}$/.test(iso)) return '';
+  try {
+    return regionNames.of(iso) || '';
+  } catch {
+    return '';
+  }
+}
+
+// Normalize one airport from the route API's `_airports` array into the shape
+// the radar renders (city + codes + country for the flag and passport).
 function pickAirport(a) {
+  const iso = (a.countryiso2 || '').toUpperCase();
   return {
-    iata: a.iata_code || '',
-    icao: a.icao_code || '',
-    municipality: a.municipality || '',
+    iata: a.iata || '',
+    icao: a.icao || '',
+    // The standing-data airport record calls the city field `location`.
+    municipality: a.location || '',
     name: a.name || '',
     // ISO 3166-1 alpha-2 country code (e.g. "GB"), used to render a flag.
-    countryIso: a.country_iso_name || '',
+    countryIso: iso,
     // Human-readable country name (e.g. "United Kingdom"), used by the
     // passport map/list to label visited countries.
-    countryName: a.country_name || '',
+    countryName: countryNameFromIso(iso),
   };
 }

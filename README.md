@@ -9,8 +9,13 @@ keyless, CORS-enabled public APIs:
 
 - **[airplanes.live](https://airplanes.live/api-guide/)** — live ADS-B positions
   around a point (returns distance + bearing from the center, ideal for a radar).
-- **[adsbdb.com](https://github.com/mrjackwills/adsbdb)** — resolves a callsign to
-  its departure/arrival airports (cached in-memory + `localStorage`).
+- **[adsb.lol](https://api.adsb.lol/docs)** `/api/0/routeset` — resolves a callsign
+  **plus the aircraft's live position** to its departure/arrival airports, returning
+  only the route it deems *plausible* for that position (cached in-memory +
+  `localStorage`). Route data is [vradarserver standing-data](https://github.com/vradarserver/standing-data)
+  under ODbL. Passing the position matters: a callsign alone is often ambiguous
+  (reused across different city pairs), so a callsign-only lookup can confidently
+  return a route belonging to a completely different flight.
 
 Both are free for non-commercial use and rate-limited to ~1 request/second.
 
@@ -76,6 +81,6 @@ with no real traffic. "Clear demo" removes them.
 
 - Coverage depends on volunteer ADS-B receivers: excellent over Europe, North
   America, East Asia and Australia; sparse over oceans and remote regions.
-- Private / general-aviation and some shuttle callsigns have no route in adsbdb,
-  so those blips show the callsign alone.
+- Private / general-aviation and some shuttle callsigns have no route in the
+  route database, so those blips show the callsign (and operator) alone.
 - Geolocation requires a secure context (`https://` or `localhost`).
