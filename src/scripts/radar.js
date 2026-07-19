@@ -22,6 +22,18 @@ const MAX_DPR = 2;
 // keep the classic green phosphor.
 const PHOSPHOR_RGB = [150, 255, 190];
 
+// ---- Phosphor trails -----------------------------------------------------
+// Each contact keeps a short history of its plotted positions so we can draw a
+// fading tail behind the blip, like the persistence smear on a real CRT scope.
+// Positions arrive once per poll (every few seconds), so a handful of fixes
+// spans a decent stretch of track without the tail growing unwieldy.
+const TRAIL_MAX = 7;
+// Peak opacity of the freshest trail segment (before the blip's sweep glow
+// scales it down further). Additive blending and a soft bloom make this read
+// as glowing phosphor rather than a flat line, so it stays subtle despite the
+// modest value.
+const TRAIL_ALPHA = 0.32;
+
 function blipAccent(b) {
   const f = b.flags || {};
   if (f.emergency) {
@@ -320,6 +332,10 @@ export class Radar {
         ...a,
         intensity: existing ? existing.intensity : 0,
         labelAlpha: existing ? existing.labelAlpha : 0,
+        // Rolling history of plotted positions (polar, relative to center) for
+        // the phosphor trail. Carried across updates and extended with the new
+        // fix; a stationary/duplicate report doesn't add a point.
+        trail: this._extendTrail(existing, a),
         // Preserve async-resolved route across position updates.
         route: existing ? existing.route : undefined,
         // A blip stays hidden until its route lookup has settled (found a
@@ -336,6 +352,20 @@ export class Radar {
         lastUpdate: now,
       });
     }
+  }
+
+  // Extend a contact's position history with its latest fix, capped at
+  // TRAIL_MAX. Stored in polar form (distance nm + bearing deg) so it maps to
+  // the scope exactly the way the blip itself is plotted, and skips repeats so
+  // a plane holding position doesn't pile up identical points.
+  _extendTrail(existing, a) {
+    const trail = existing && Array.isArray(existing.trail) ? existing.trail.slice() : [];
+    const last = trail[trail.length - 1];
+    if (!last || last.d !== a.distanceNm || last.b !== a.bearingDeg) {
+      trail.push({ d: a.distanceNm, b: a.bearingDeg });
+      if (trail.length > TRAIL_MAX) trail.shift();
+    }
+    return trail;
   }
 
   /** Remove blips we haven't heard about in `staleAfterSec`. */
@@ -612,6 +642,9 @@ export class Radar {
       const pulseMul = special ? 0.7 + 0.3 * this.pulse : 1;
       const glow = b.intensity * distDim * pulseMul;
 
+      // Phosphor trail first, so the blip and its halo sit on top of the tail.
+      this._drawTrail(ctx, cx, cy, R, b, glow, rgb);
+
       // Special traffic gets a slightly larger, colour-matched halo so it
       // reads as an alert rather than ordinary phosphor.
       const haloR = (12 + glow * 10) * sizeFactor * (special ? 1.25 : 1);
@@ -731,6 +764,73 @@ export class Radar {
     const ox = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
     const oy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
     return ox * oy;
+  }
+
+  // Convert a polar position (distance nm + bearing deg) to canvas x/y using
+  // the same range-fraction mapping as the blips, so a trail point lands
+  // exactly where the contact sat when that fix arrived.
+  _project(cx, cy, R, d, bearingDeg) {
+    const rr = Math.min(1, Math.max(0, d / this.rangeNm)) * R;
+    const rad = bearingDeg * DEG;
+    return { x: cx + Math.sin(rad) * rr, y: cy - Math.cos(rad) * rr };
+  }
+
+  // Draw the fading phosphor tail behind a blip: a tapered smear through its
+  // recent positions, brightest and thickest at the newest segment (nearest
+  // the plane) and decaying toward the oldest fix. It's rendered as *emitted*
+  // light (additive blending + a soft bloom halo) so it glows and blooms where
+  // it overlaps like excited phosphor on a CRT, and the brightness falls off
+  // quadratically with age to mimic the tube's exponential persistence decay.
+  // The whole trail is scaled by the blip's current sweep glow so it flares and
+  // fades with the contact rather than lingering as a static scribble.
+  _drawTrail(ctx, cx, cy, R, b, glow, rgb) {
+    const trail = b.trail;
+    if (!trail || trail.length < 2 || glow <= 0.02) return;
+    const n = trail.length;
+
+    ctx.save();
+    // Phosphor emits light, so overlapping glow should add up and bloom.
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    const points = trail.map((p) => this._project(cx, cy, R, p.d, p.b));
+    for (let i = 1; i < n; i++) {
+      const ageFrac = i / (n - 1); // 0 (oldest) .. 1 (newest, at the plane)
+      // Quadratic decay: brightness drops off quickly behind the blip.
+      const a = TRAIL_ALPHA * ageFrac * ageFrac * glow;
+      if (a <= 0.01) continue;
+      ctx.strokeStyle = rgba(rgb, a);
+      ctx.lineWidth = 0.6 + 1.8 * ageFrac;
+      // Soft bloom around the hot core sells the glowing-gas look.
+      ctx.shadowColor = rgba(rgb, a);
+      ctx.shadowBlur = 5 * ageFrac;
+      ctx.beginPath();
+      ctx.moveTo(points[i - 1].x, points[i - 1].y);
+      ctx.lineTo(points[i].x, points[i].y);
+      ctx.stroke();
+    }
+
+    // A faint blooming node at each past fix softens the straight-line joints
+    // and reads as the phosphor being re-excited at each sample. The newest
+    // point is skipped: the blip's own halo already sits there.
+    ctx.shadowBlur = 0;
+    for (let i = 0; i < n - 1; i++) {
+      const ageFrac = i / (n - 1);
+      const a = TRAIL_ALPHA * 0.8 * ageFrac * ageFrac * glow;
+      if (a <= 0.01) continue;
+      const p = points[i];
+      const r = 2.5 + 2.5 * ageFrac;
+      const node = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+      node.addColorStop(0, rgba(rgb, a));
+      node.addColorStop(1, rgba(rgb, 0));
+      ctx.fillStyle = node;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, TAU);
+      ctx.fill();
+    }
+
+    ctx.restore();
   }
 
   // Draw a small top-down airplane silhouette centered at (x, y), rotated to

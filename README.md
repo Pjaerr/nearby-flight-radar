@@ -19,6 +19,10 @@ keyless, CORS-enabled public sources:
   airports' coordinates, the app disambiguates **client-side**: it keeps a route
   only if the aircraft's live position falls within a great-circle corridor of
   the route, and rejects the mismatches.
+- **[vradarserver standing-data `airlines.csv`](https://github.com/vradarserver/standing-data/tree/main/airlines)**
+  — the route files carry only an ICAO airline *code* (e.g. `BAW`), so this
+  CC0 dataset maps it to a readable name (`British Airways`). Fetched at most
+  once per session and cached for a week in `localStorage`.
 
 Both are free for non-commercial use and rate-limited to ~1 request/second.
 

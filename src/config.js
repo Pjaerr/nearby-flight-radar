@@ -34,6 +34,12 @@ export const CONFIG = {
   // Drop aircraft we haven't seen a position for in this many seconds.
   staleAfterSec: 30,
 
+  // How long a blip's phosphor glow lingers after the sweep pings it, in
+  // seconds. Higher keeps contacts visible further into the gap between
+  // sweeps. Keep it below the sweep period (~8s) so blips still fade toward
+  // dark before the arm comes back around, rather than glowing the whole time.
+  blipPersistenceSec: 7,
+
   // Ignore aircraft whose last ADS-B position fix is older than this many
   // seconds. airplanes.live keeps returning contacts with stale positions
   // (`seen_pos`); without this filter the scope fills up with planes that

@@ -1,7 +1,8 @@
-// Data layer. Two keyless, CORS-enabled public sources:
-//   - airplanes.live  -> live ADS-B positions around a point
+// Data layer. Keyless, CORS-enabled public sources:
+//   - airplanes.live -> live ADS-B positions around a point
 //   - adsb.lol        -> callsign -> route (origin/dest), plausibility checked here
-// Both send `Access-Control-Allow-Origin: *`, so the browser calls them
+//   - vradarserver    -> airline ICAO code -> name (standing-data airlines.csv)
+// All send `Access-Control-Allow-Origin: *`, so the browser calls them
 // directly. No proxy, no API key, no backend.
 
 const POSITIONS_BASE = 'https://api.airplanes.live/v2/point';
@@ -32,6 +33,153 @@ const EARTH_RADIUS_NM = 3440.065;
 function routeUrlFor(callsign) {
   const cs = callsign.toUpperCase();
   return `${ROUTES_BASE}/${encodeURIComponent(cs.slice(0, 2))}/${encodeURIComponent(cs)}.json`;
+}
+
+// ---- Airline code -> name lookup -----------------------------------------
+// The route files carry only an ICAO airline *code* (e.g. "BAW"), not a
+// readable name, and the positions feed doesn't send an owner/operator on the
+// point endpoint \u2014 so without this, airline-style flights show up nameless.
+// vradarserver's standing-data ships an `airlines.csv` (CC0, CORS-enabled,
+// updated hourly) mapping that code to a name ("British Airways"). It's ~180 KB,
+// so we fetch it at most once per session and cache the parsed map in
+// localStorage for a week; individual resolved routes are themselves cached
+// (see below), so a later session keeps its airline names even if this file is
+// briefly unreachable.
+const AIRLINES_URL =
+  'https://raw.githubusercontent.com/vradarserver/standing-data/main/airlines/schema-01/airlines.csv';
+const LS_AIRLINES_KEY = 'airlines';
+const AIRLINES_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Resolved code->name map once available, plus the in-flight load so concurrent
+// route lookups share a single fetch rather than each pulling the CSV.
+let airlineMap = null;
+let airlineMapPromise = null;
+
+// Split one CSV line into fields, honouring double-quoted fields that may
+// contain commas or escaped ("") quotes \u2014 a handful of airline names do.
+function parseCsvLine(line) {
+  const out = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      out.push(field);
+      field = '';
+    } else {
+      field += ch;
+    }
+  }
+  out.push(field);
+  return out;
+}
+
+// A few HTML entities leak into the source names (e.g. "Muller &amp; Co.").
+function decodeEntities(s) {
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"');
+}
+
+// Build a code->name Map from the CSV text. Columns: Code,Name,ICAO,IATA,...
+// Key by both the ICAO and the leading Code column (identical for the 3-letter
+// airline codes routes use) so either form resolves; ICAO wins on conflict.
+function parseAirlineCsv(text) {
+  const map = new Map();
+  const lines = text.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const cols = parseCsvLine(line);
+    const code = (cols[0] || '').trim().toUpperCase();
+    const name = decodeEntities((cols[1] || '').trim());
+    const icao = (cols[2] || '').trim().toUpperCase();
+    if (!name) continue;
+    if (icao && !map.has(icao)) map.set(icao, name);
+    if (code && !map.has(code)) map.set(code, name);
+  }
+  return map;
+}
+
+// Restore a still-fresh map from localStorage, or null when absent/expired.
+function loadAirlineMapFromStorage() {
+  try {
+    const raw = localStorage.getItem(LS_AIRLINES_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed && typeof parsed.e === 'number' && parsed.e > Date.now() &&
+      parsed.m && typeof parsed.m === 'object'
+    ) {
+      return new Map(Object.entries(parsed.m));
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function persistAirlineMap(map) {
+  try {
+    const obj = {};
+    for (const [k, v] of map) obj[k] = v;
+    localStorage.setItem(LS_AIRLINES_KEY, JSON.stringify({ e: Date.now() + AIRLINES_TTL_MS, m: obj }));
+  } catch {
+    /* storage full or unavailable; ignore */
+  }
+}
+
+// Resolve the shared code->name map: memory -> localStorage -> network (once).
+// Returns null on failure and clears the in-flight promise so a later lookup
+// retries rather than being stuck with no names for the session.
+async function ensureAirlineMap() {
+  if (airlineMap) return airlineMap;
+  const stored = loadAirlineMapFromStorage();
+  if (stored) {
+    airlineMap = stored;
+    return airlineMap;
+  }
+  if (!airlineMapPromise) {
+    airlineMapPromise = (async () => {
+      try {
+        const res = await fetch(AIRLINES_URL, { headers: { Accept: 'text/csv' } });
+        if (!res.ok) return null;
+        const map = parseAirlineCsv(await res.text());
+        if (map.size) {
+          persistAirlineMap(map);
+          return map;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  const map = await airlineMapPromise;
+  if (map) airlineMap = map;
+  else airlineMapPromise = null;
+  return airlineMap;
+}
+
+// Resolve an ICAO airline code (e.g. "BAW") to a display name, or null when the
+// code is empty/unknown or the dataset couldn't be loaded. Never throws.
+async function airlineNameFor(code) {
+  const c = (code || '').trim().toUpperCase();
+  if (!c) return null;
+  const map = await ensureAirlineMap();
+  return (map && map.get(c)) || null;
 }
 
 // ---- Structured API errors -----------------------------------------------
@@ -144,7 +292,9 @@ const MIL_CALLSIGN_RE =
   /^(RCH|RRR|RFR|CFC|CTM|NATO|FAF|IAM|GAF|BAF|MMF|NAF|RSF|ASY|LAGR|HERKY|RESCUE|PAT|EVAC|BOXER|DOOM|REACH|ASCOT|COBRA|VVIP|IRON|SLAM|SNAKE|VADER|GRZLY|HOBO|ROVER|TROLL|BLADE|KNIFE|SHELL|QUID|NOBLE)/i;
 
 // Rare / iconic airframes worth calling out regardless of how close they are.
-const RARE_TYPES = new Set([
+// Exported so the passport's spotting logbooks can flag a rare catch even when
+// it was collected before this session (e.g. backfilled from stored history).
+export const RARE_TYPES = new Set([
   'A388', // A380 superjumbo
   'A124', 'A225', // Antonov An-124 / An-225
   'B52', 'C5M', 'C17', 'A400', // large military transports/bombers
@@ -326,6 +476,20 @@ function readLocalStorage(callsign) {
   return { value: rec.v ?? null, expires: rec.e };
 }
 
+// Non-fetching lookup of an already-resolved route for a callsign, from the
+// in-memory or localStorage cache. Returns the route (with airport city names
+// and country codes) or null. Used by the passport to backfill readable route
+// detail for older stored flights that predate storing those fields inline.
+export function cachedRouteFor(callsign) {
+  if (!callsign) return null;
+  const now = Date.now();
+  const mem = routeMemory.get(callsign);
+  if (mem && mem.expires > now) return mem.value;
+  const rec = routeStore[callsign];
+  if (rec && typeof rec.e === 'number' && rec.e > now) return rec.v ?? null;
+  return null;
+}
+
 function writeLocalStorage(callsign, value, expires) {
   routeStore[callsign] = { v: value ?? null, e: expires };
   persistRouteStore();
@@ -369,20 +533,34 @@ function initialBearing(lat1, lon1, lat2, lon2) {
   return Math.atan2(y, x);
 }
 
-// Is point P plausibly on the leg A->B? True when P's perpendicular
-// (cross-track) distance from the A->B great circle is within the corridor AND
-// P projects roughly between A and B (along-track), with a corridor-sized
-// margin so contacts just short of / past an airport still count.
-function nearLeg(pLat, pLon, aLat, aLon, bLat, bLon) {
+// Bearing from point 1 to point 2 in degrees (0-360).
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  return (initialBearing(lat1, lon1, lat2, lon2) * 180) / Math.PI;
+}
+
+// Smallest absolute difference between two compass bearings, in degrees (0-180).
+function angleDiff(a, b) {
+  const d = Math.abs(((a - b) % 360 + 360) % 360);
+  return d > 180 ? 360 - d : d;
+}
+
+// Where does point P sit relative to leg A->B? Returns the perpendicular
+// (cross-track) distance in nm and whether P projects roughly between A and B
+// (along-track) within a corridor-sized margin, so contacts just short of / past
+// an airport still count. `onLeg` is false when P is outside the corridor.
+function legMetrics(pLat, pLon, aLat, aLon, bLat, bLon) {
   const legLen = haversineNm(aLat, aLon, bLat, bLon);
-  if (legLen === 0) return haversineNm(pLat, pLon, aLat, aLon) <= ROUTE_CORRIDOR_NM;
+  if (legLen === 0) {
+    const d = haversineNm(pLat, pLon, aLat, aLon);
+    return { onLeg: d <= ROUTE_CORRIDOR_NM, crossTrack: d };
+  }
 
   const distAP = haversineNm(aLat, aLon, pLat, pLon) / EARTH_RADIUS_NM; // angular
   const bearAP = initialBearing(aLat, aLon, pLat, pLon);
   const bearAB = initialBearing(aLat, aLon, bLat, bLon);
 
   const crossTrack = Math.abs(Math.asin(Math.sin(distAP) * Math.sin(bearAP - bearAB)) * EARTH_RADIUS_NM);
-  if (crossTrack > ROUTE_CORRIDOR_NM) return false;
+  if (crossTrack > ROUTE_CORRIDOR_NM) return { onLeg: false, crossTrack };
 
   // Along-track distance of P's projection from A, in nm. `acos` only yields the
   // magnitude, so restore the sign from the bearing delta: when P bears more
@@ -391,32 +569,66 @@ function nearLeg(pLat, pLon, aLat, aLon, bLat, bLon) {
   const alongMag =
     Math.acos(Math.cos(distAP) / Math.cos(crossTrack / EARTH_RADIUS_NM)) * EARTH_RADIUS_NM;
   const alongTrack = Math.cos(bearAP - bearAB) < 0 ? -alongMag : alongMag;
-  return alongTrack >= -ROUTE_CORRIDOR_NM && alongTrack <= legLen + ROUTE_CORRIDOR_NM;
+  const onLeg = alongTrack >= -ROUTE_CORRIDOR_NM && alongTrack <= legLen + ROUTE_CORRIDOR_NM;
+  return { onLeg, crossTrack };
 }
 
-// A multi-leg route is plausible if the contact is near any single leg.
-function isRoutePlausible(airports, lat, lon) {
+// Legs whose cross-track distances are within this margin of each other are
+// treated as a tie \u2014 typically the outbound and return legs of a round trip,
+// which share one corridor \u2014 and the aircraft's heading decides between them.
+const LEG_TIE_NM = 50;
+
+// Pick the leg of a (possibly multi-stop / round-trip) route the contact is
+// currently flying, so origin/destination reflect *this* leg rather than the
+// whole rotation (e.g. STR->MAN->STR must resolve to MAN->STR, not STR->STR).
+// Returns { origin, destination } airport records, or null when the contact
+// isn't plausibly on any leg (a reused/mislabelled callsign).
+function selectLeg(airports, lat, lon, track) {
+  const candidates = [];
   for (let i = 0; i < airports.length - 1; i++) {
     const a = airports[i];
     const b = airports[i + 1];
     if (
-      Number.isFinite(a?.lat) && Number.isFinite(a?.lon) &&
-      Number.isFinite(b?.lat) && Number.isFinite(b?.lon) &&
-      nearLeg(lat, lon, a.lat, a.lon, b.lat, b.lon)
+      !(Number.isFinite(a?.lat) && Number.isFinite(a?.lon) &&
+        Number.isFinite(b?.lat) && Number.isFinite(b?.lon))
     ) {
-      return true;
+      continue;
+    }
+    const m = legMetrics(lat, lon, a.lat, a.lon, b.lat, b.lon);
+    if (m.onLeg) candidates.push({ origin: a, destination: b, crossTrack: m.crossTrack });
+  }
+  if (candidates.length === 0) return null;
+
+  const minCross = Math.min(...candidates.map((c) => c.crossTrack));
+  const tied = candidates.filter((c) => c.crossTrack <= minCross + LEG_TIE_NM);
+
+  // Single clear leg (or no usable heading): take the closest corridor.
+  let chosen = tied[0];
+  // Overlapping corridors: the aircraft is heading toward its real destination,
+  // so prefer the leg whose arrival airport best matches the current track.
+  if (Number.isFinite(track) && tied.length > 1) {
+    let bestPenalty = Infinity;
+    for (const c of tied) {
+      const penalty = angleDiff(track, bearingDeg(lat, lon, c.destination.lat, c.destination.lon));
+      if (penalty < bestPenalty) {
+        bestPenalty = penalty;
+        chosen = c;
+      }
     }
   }
-  return false;
+  return { origin: chosen.origin, destination: chosen.destination };
 }
 
 /**
  * Resolve a callsign to { origin, destination } (each with iata, icao,
  * municipality, name) or null if unknown. Needs the aircraft's live position
  * (lat, lon) to confirm the route is plausible for *this* contact rather than a
- * different flight sharing the callsign. Never throws.
+ * different flight sharing the callsign, and to pick the current leg of a
+ * multi-stop/round-trip rotation. The optional `track` (heading in degrees)
+ * disambiguates direction when the out and back legs share a corridor. Never
+ * throws.
  */
-export async function lookupRoute(callsign, lat, lon) {
+export async function lookupRoute(callsign, lat, lon, track) {
   if (!callsign) return null;
 
   const now = Date.now();
@@ -458,18 +670,22 @@ export async function lookupRoute(callsign, lat, lon) {
       return null;
     }
 
-    // A route exists but the aircraft isn't near its great-circle corridor:
-    // almost always a reused/aliased callsign pointing at the wrong flight.
-    // Reject it, but *don't* cache \u2014 plausibility is position-dependent, so a
-    // later, correctly-placed sighting should re-check.
-    if (!isRoutePlausible(airports, lat, lon)) return null;
+    // Pick the leg the contact is actually flying. A null result means it isn't
+    // near any leg's great-circle corridor \u2014 almost always a reused/aliased
+    // callsign pointing at the wrong flight. Reject it, but *don't* cache:
+    // plausibility is position-dependent, so a later, correctly-placed sighting
+    // should re-check.
+    const leg = selectLeg(airports, lat, lon, track);
+    if (!leg) return null;
 
     const route = {
-      // The file only carries an airline *code*; the human-readable operator
-      // name (from the positions feed) is used at display time.
-      airline: null,
-      origin: pickAirport(airports[0]),
-      destination: pickAirport(airports[airports.length - 1]),
+      // The file only carries an ICAO airline *code* (e.g. "BAW"); resolve it to
+      // a readable name via the airlines dataset. Null when the code is missing
+      // or the dataset is briefly unreachable \u2014 the display then falls back to
+      // the operator/owner from the positions feed.
+      airline: await airlineNameFor(r.airline_code),
+      origin: pickAirport(leg.origin),
+      destination: pickAirport(leg.destination),
     };
     cacheRoute(callsign, route);
     return route;
@@ -509,6 +725,11 @@ function pickAirport(a) {
     // The standing-data airport record calls the city field `location`.
     municipality: a.location || '',
     name: a.name || '',
+    // Airport coordinates (from the standing-data file). Kept so the passport
+    // can measure how far an origin is from your radar and the great-circle
+    // length of a route (for the "farthest origin" / "longest route" stats).
+    lat: Number.isFinite(a.lat) ? a.lat : null,
+    lon: Number.isFinite(a.lon) ? a.lon : null,
     // ISO 3166-1 alpha-2 country code (e.g. "GB"), used to render a flag.
     countryIso: iso,
     // Human-readable country name (e.g. "United Kingdom"), used by the

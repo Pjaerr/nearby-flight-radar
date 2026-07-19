@@ -268,17 +268,69 @@
       <div class="modal-card passport-card">
         <div class="modal-head">
           <span>FLIGHT PASSPORT</span>
-          <button id="passport-close" type="button" class="icon-btn" aria-label="Close">&times;</button>
+          <div class="modal-head-actions">
+            <button id="passport-reset" type="button" class="passport-reset">Reset</button>
+            <button id="passport-close" type="button" class="icon-btn" aria-label="Close">&times;</button>
+          </div>
         </div>
-        <div class="passport-crt">
-          <div id="passport-map" class="map passport-map"></div>
+
+        <div id="passport-tabs" class="passport-tabs" role="tablist" aria-label="Passport sections">
+          <button type="button" class="passport-tab is-active" data-tab="countries" role="tab" aria-selected="true">Countries</button>
+          <button type="button" class="passport-tab" data-tab="aircraft" role="tab" aria-selected="false">Aircraft</button>
+          <button type="button" class="passport-tab" data-tab="airlines" role="tab" aria-selected="false">Airlines</button>
+          <button type="button" class="passport-tab" data-tab="badges" role="tab" aria-selected="false">Badges</button>
+          <button type="button" class="passport-tab" data-tab="stats" role="tab" aria-selected="false">Stats</button>
         </div>
-        <div class="passport-stats">
-          <output id="passport-count">0 / 195 countries</output>
-          <button id="passport-reset" type="button" class="passport-reset">Reset</button>
+
+        <div class="passport-body">
+          <!-- Countries: world map + clickable detail + day-grouped list. -->
+          <section id="tab-countries" class="passport-panel" role="tabpanel">
+            <p class="modal-hint modal-hint-sticky">Countries glow brighter the more flights cross your radar. Click a country (map or chip) to pin its flights.</p>
+            <div class="passport-crt">
+              <div id="passport-map" class="map passport-map"></div>
+            </div>
+            <div id="passport-list" class="passport-list"></div>
+            <div id="passport-country-detail" class="country-detail">
+              <p class="passport-hint">Select a country on the map or a chip above to see its flights.</p>
+            </div>
+          </section>
+
+          <!-- Aircraft spotting logbook: one table, grouped by type or by
+               individual registration (tail). -->
+          <section id="tab-aircraft" class="passport-panel" role="tabpanel" hidden>
+            <div class="log-toolbar">
+              <div id="aircraft-groupby" class="seg" role="group" aria-label="Group aircraft by">
+                <button type="button" class="seg-btn is-active" data-group="type" aria-pressed="true">By type</button>
+                <button type="button" class="seg-btn" data-group="reg" aria-pressed="false">By registration</button>
+              </div>
+            </div>
+            <table class="log-table">
+              <thead id="aircraft-head"></thead>
+              <tbody id="aircraft-body"></tbody>
+            </table>
+          </section>
+
+          <!-- Airlines spotting logbook. -->
+          <section id="tab-airlines" class="passport-panel" role="tabpanel" hidden>
+            <table class="log-table">
+              <thead>
+                <tr><th>Airline / operator</th><th>First seen</th><th class="log-count">Seen</th></tr>
+              </thead>
+              <tbody id="airlines-body"></tbody>
+            </table>
+          </section>
+
+          <!-- Achievements / badges. -->
+          <section id="tab-badges" class="passport-panel" role="tabpanel" hidden>
+            <div id="badges-grid" class="badges-grid"></div>
+          </section>
+
+          <!-- Session / day stats. -->
+          <section id="tab-stats" class="passport-panel" role="tabpanel" hidden>
+            <div id="stats-body" class="stats-body"></div>
+            <p class="modal-hint">Session figures reset when you reload; your countries, logbooks and badges are saved.</p>
+          </section>
         </div>
-        <div id="passport-list" class="passport-list"></div>
-        <p class="modal-hint">Countries glow brighter the more flights to or from there cross your radar. Hover a country for its flights; the list below groups your collection by day.</p>
       </div>
     </div>
 
@@ -799,7 +851,69 @@
         opacity: 0.55;
       }
 
-      .passport-card { max-width: 720px; }
+      /* The passport is the app's richest surface: a big, tabbed modal. Lay it
+         out as a column so the header + tab bar stay pinned while the active
+         panel scrolls. */
+      .passport-card {
+        max-width: 940px;
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        /* Fixed height so switching tabs never resizes the card; the active
+           panel scrolls within the body instead of the whole modal jumping. */
+        height: 92vh;
+      }
+      .passport-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 2px;
+        padding: 8px 10px 0;
+        border-bottom: 1px solid rgba(0, 255, 120, 0.2);
+      }
+      .passport-tab {
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--green);
+        background: transparent;
+        border: 1px solid transparent;
+        border-bottom: none;
+        border-radius: 6px 6px 0 0;
+        padding: 7px 12px;
+        cursor: pointer;
+        opacity: 0.6;
+        transition: opacity 0.15s ease, background 0.15s ease;
+      }
+      .passport-tab:hover { opacity: 0.9; background: rgba(0, 255, 120, 0.08); }
+      .passport-tab.is-active {
+        opacity: 1;
+        color: #baffd7;
+        background: rgba(0, 255, 120, 0.12);
+        border-color: rgba(0, 255, 120, 0.35);
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.5);
+      }
+      .passport-body {
+        flex: 1;
+        overflow-y: auto;
+        min-height: 0;
+        /* Keep the body's own scroll from chaining out to the page behind. */
+        overscroll-behavior: contain;
+      }
+      .passport-panel[hidden] { display: none; }
+      /* Countries notice pinned to the top of the scrolling body so it stays
+         visible no matter how far the list is scrolled. */
+      .modal-hint-sticky {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        margin: 0;
+        padding: 10px 14px;
+        background: #041a0d;
+        border-bottom: 1px solid rgba(0, 255, 120, 0.2);
+        opacity: 1;
+      }
+
       /* CRT enclosure for the world map: same scanline/glare/vignette treatment
          as the round radar tube, but rectangular. The map sits at the bottom of
          the stack; the overlays below are painted on top and ignore pointer
@@ -811,7 +925,7 @@
         border-bottom: 1px solid rgba(0, 255, 120, 0.2);
       }
       .passport-map {
-        height: 380px;
+        height: 360px;
         /* Ocean is black; the seamless land layer paints continents black with
            a green coastline, so the map reads as green outlines on a dark tube
            with visited countries filled green. */
@@ -881,38 +995,36 @@
           rgba(0, 10, 4, 0.35) 100%
         );
       }
-      .passport-stats {
+      .modal-head-actions {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 12px 14px 6px;
-      }
-      #passport-count {
-        font-weight: 700;
-        font-size: 14px;
-        color: #baffd7;
-        text-shadow: 0 0 8px rgba(0, 255, 120, 0.5);
+        gap: 10px;
       }
       .passport-reset {
         font: inherit;
         font-size: 10px;
         letter-spacing: 0.1em;
-        color: var(--green);
-        background: rgba(0, 255, 120, 0.1);
-        border: 1px solid rgba(0, 255, 120, 0.4);
+        color: rgba(0, 255, 120, 0.7);
+        background: transparent;
+        border: 1px solid rgba(0, 255, 120, 0.3);
         border-radius: 4px;
-        padding: 3px 10px;
+        padding: 3px 9px;
         cursor: pointer;
-        transition: background 0.15s ease;
+        transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
       }
-      .passport-reset:hover { background: rgba(0, 255, 120, 0.25); }
+      .passport-reset:hover {
+        background: rgba(255, 60, 60, 0.14);
+        border-color: rgba(255, 90, 90, 0.5);
+        color: #ff9a9a;
+      }
+      .passport-reset:focus-visible {
+        outline: 2px solid rgba(0, 255, 120, 0.5);
+        outline-offset: 2px;
+      }
       .passport-list {
         display: flex;
         flex-direction: column;
         gap: 10px;
-        max-height: 168px;
-        overflow-y: auto;
         padding: 6px 14px 4px;
       }
       .passport-day {
@@ -939,7 +1051,16 @@
         opacity: 0.75;
         font-size: 10px;
       }
+      .passport-map :global(.leaflet-tooltip) .tip-hint {
+        display: block;
+        margin-top: 2px;
+        opacity: 0.5;
+        font-size: 9px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
       .passport-chip {
+        font: inherit;
         font-size: 11px;
         color: #baffd7;
         background: rgba(0, 255, 120, 0.1);
@@ -947,11 +1068,305 @@
         border-radius: 12px;
         padding: 2px 9px;
         white-space: nowrap;
+        cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+      .passport-chip:hover { background: rgba(0, 255, 120, 0.22); }
+      .passport-chip.is-selected {
+        background: rgba(0, 255, 120, 0.3);
+        border-color: #baffd7;
+        color: #eafff2;
       }
       .passport-empty {
         margin: 0;
         font-size: 12px;
         opacity: 0.55;
+      }
+
+      /* ---- Country detail panel (Countries tab) --------------------------- */
+      .country-detail {
+        padding: 8px 14px 4px;
+      }
+      .passport-hint {
+        margin: 0;
+        font-size: 12px;
+        opacity: 0.55;
+      }
+      .country-detail-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 6px;
+      }
+      .country-detail-title {
+        font-size: 15px;
+        font-weight: 700;
+        color: #baffd7;
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.4);
+      }
+      .country-detail-meta {
+        font-size: 11px;
+        opacity: 0.6;
+        letter-spacing: 0.04em;
+        margin-left: auto;
+      }
+      .country-detail-clear {
+        font: inherit;
+        font-size: 16px;
+        line-height: 1;
+        color: var(--green);
+        background: rgba(0, 255, 120, 0.1);
+        border: 1px solid rgba(0, 255, 120, 0.4);
+        border-radius: 4px;
+        padding: 1px 8px;
+        cursor: pointer;
+        transition: background 0.15s ease;
+      }
+      .country-detail-clear:hover { background: rgba(0, 255, 120, 0.25); }
+      .country-flight-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 220px;
+        overflow-y: auto;
+        /* Scroll the flight list on its own; don't chain out to the modal body
+           once the top/bottom is reached. */
+        overscroll-behavior: contain;
+      }
+      .cflight {
+        padding: 7px 10px;
+        border: 1px solid rgba(0, 255, 120, 0.15);
+        border-radius: 6px;
+        background: rgba(0, 40, 18, 0.28);
+      }
+      .cflight-route {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 6px;
+        font-size: 13px;
+        color: #d3ffe6;
+      }
+      .cflight-place { font-weight: 700; }
+      /* The endpoint that is the country you're viewing is highlighted. */
+      .cflight-place.is-here {
+        color: #eafff2;
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.5);
+      }
+      .cflight-arrow {
+        color: var(--green);
+        opacity: 0.7;
+        font-weight: 700;
+      }
+      .cflight-meta {
+        margin-top: 3px;
+        font-size: 11px;
+        color: #8fd4ad;
+        opacity: 0.85;
+        letter-spacing: 0.02em;
+      }
+
+      /* ---- Logbook tables (Aircraft / Airlines) --------------------------- */
+      /* Toolbar above a logbook table holding the grouping toggle. Sticky so it
+         stays put while the (potentially long) table scrolls beneath it. */
+      .log-toolbar {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        display: flex;
+        gap: 8px;
+        padding: 10px 14px;
+        background: #041a0d;
+        border-bottom: 1px solid rgba(0, 255, 120, 0.15);
+      }
+      .seg {
+        display: inline-flex;
+        border: 1px solid rgba(0, 255, 120, 0.35);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .seg-btn {
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        color: var(--green);
+        background: transparent;
+        border: none;
+        padding: 5px 12px;
+        cursor: pointer;
+        opacity: 0.7;
+        transition: background 0.15s ease, opacity 0.15s ease;
+      }
+      .seg-btn + .seg-btn { border-left: 1px solid rgba(0, 255, 120, 0.35); }
+      .seg-btn:hover { opacity: 1; background: rgba(0, 255, 120, 0.08); }
+      .seg-btn.is-active {
+        opacity: 1;
+        color: #02160b;
+        background: var(--green);
+        font-weight: 700;
+      }
+      /* The grouping toolbar is sticky at the top; offset the sticky header row
+         so it parks just beneath it instead of hiding behind it. */
+      #tab-aircraft .log-table thead th { top: 43px; }
+
+      .log-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      .log-table thead th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        text-align: left;
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--green);
+        opacity: 0.8;
+        background: #041a0d;
+        padding: 10px 14px 8px;
+        border-bottom: 1px solid rgba(0, 255, 120, 0.25);
+      }
+      .log-table th.log-count,
+      .log-table td.log-count { text-align: right; }
+      .log-table tbody td {
+        padding: 7px 14px;
+        border-bottom: 1px solid rgba(0, 255, 120, 0.08);
+        color: #a9e8c4;
+      }
+      .log-table tbody tr:hover td { background: rgba(0, 255, 120, 0.06); }
+      .log-code {
+        font-weight: 700;
+        color: #baffd7;
+        letter-spacing: 0.04em;
+      }
+      .log-name { color: #9fe0bd; }
+      .log-first { opacity: 0.7; font-size: 11px; }
+      .log-count {
+        font-weight: 700;
+        color: #baffd7;
+        font-variant-numeric: tabular-nums;
+      }
+      .log-tag-cell { white-space: nowrap; }
+      .log-tag {
+        display: inline-block;
+        font-size: 9px;
+        letter-spacing: 0.08em;
+        border-radius: 4px;
+        padding: 1px 5px;
+        margin-right: 4px;
+      }
+      .tag-rare {
+        color: #bfe9ff;
+        background: rgba(120, 225, 255, 0.14);
+        border: 1px solid rgba(120, 225, 255, 0.5);
+      }
+      .tag-mil {
+        color: #ffe6a0;
+        background: rgba(255, 205, 70, 0.14);
+        border: 1px solid rgba(255, 205, 70, 0.5);
+      }
+      .log-empty {
+        padding: 24px 14px;
+        text-align: center;
+        opacity: 0.5;
+        font-size: 12px;
+      }
+
+      /* ---- Badges --------------------------------------------------------- */
+      .badges-head {
+        padding: 12px 14px 4px;
+        font-size: 12px;
+        font-weight: 700;
+        color: #baffd7;
+        letter-spacing: 0.08em;
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.4);
+      }
+      .badges-wrap {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        gap: 10px;
+        padding: 8px 14px 16px;
+      }
+      .badge {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        padding: 12px;
+        border-radius: 8px;
+        border: 1px solid rgba(0, 255, 120, 0.2);
+        background: rgba(0, 40, 18, 0.3);
+      }
+      .badge.is-earned {
+        border-color: rgba(0, 255, 120, 0.55);
+        background: rgba(0, 255, 120, 0.1);
+        box-shadow: 0 0 16px rgba(0, 255, 120, 0.15);
+      }
+      .badge.is-locked { opacity: 0.5; }
+      .badge-star {
+        font-size: 18px;
+        line-height: 1;
+        color: var(--green);
+      }
+      .badge.is-earned .badge-star {
+        color: #eafff2;
+        text-shadow: 0 0 10px rgba(0, 255, 120, 0.7);
+      }
+      .badge-name {
+        font-size: 13px;
+        font-weight: 700;
+        color: #baffd7;
+      }
+      .badge-desc {
+        font-size: 11px;
+        opacity: 0.6;
+        color: #9fe0bd;
+      }
+      .badge-detail {
+        font-size: 11px;
+        opacity: 0.75;
+        color: #9fe0bd;
+      }
+      .badge.is-earned .badge-detail {
+        opacity: 1;
+        font-weight: 700;
+        color: #d9ffec;
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.35);
+      }
+
+      /* ---- Session / day stats ------------------------------------------- */
+      .stats-body {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        gap: 10px;
+        padding: 14px;
+      }
+      .stat-card {
+        padding: 12px 14px;
+        border-radius: 8px;
+        border: 1px solid rgba(0, 255, 120, 0.25);
+        background: rgba(0, 40, 18, 0.35);
+      }
+      .stat-value {
+        font-size: 18px;
+        font-weight: 700;
+        color: #baffd7;
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.45);
+        line-height: 1.2;
+        word-break: break-word;
+      }
+      .stat-label {
+        margin-top: 4px;
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        opacity: 0.65;
       }
     </style>
   </body>
