@@ -44,7 +44,6 @@ const els = {
   rangeValue: document.getElementById('range-value'),
   fullscreen: document.getElementById('fullscreen-btn'),
   sound: document.getElementById('sound-btn'),
-  compass: document.getElementById('compass-btn'),
   apply: document.getElementById('range-apply'),
   // Dev / demo panel.
   devPanel: document.getElementById('dev-panel'),
@@ -3676,163 +3675,6 @@ function wireSound() {
   els.sound.addEventListener('click', () => setSound(!audio.enabled));
 }
 
-// ---- Compass heading-up mode ----------------------------------------------
-//
-// On a phone/tablet with a magnetometer, the scope can rotate so the direction
-// you're facing sits at the top, making it easy to relate a blip on screen to
-// something in the sky. The button is hidden on devices that can't provide a
-// heading. Enabling it may require a one-time permission prompt (iOS 13+), so
-// the request is made from the click handler (a user gesture).
-
-let compassOn = false;
-let compassBindings = []; // [{ name, fn }] currently attached to window
-let compassFixTimer = null;
-
-// Debug override: append `?compass=1` (or `#compass`) to force the button to
-// show on a desktop so the heading-up mode can be exercised with Chrome
-// DevTools' Sensors panel (Orientation override), which has no magnetometer of
-// its own. In this mode we also listen to the plain `deviceorientation` event
-// that the emulator dispatches, not just the absolute one.
-function compassForced() {
-  try {
-    const p = new URLSearchParams(location.search);
-    return p.get('compass') === '1' || location.hash.replace('#', '') === 'compass';
-  } catch {
-    return false;
-  }
-}
-
-// Whether this device is likely to expose a usable compass heading: it must
-// support the orientation event and be a touch/coarse-pointer device (a
-// desktop reports the event type but has no magnetometer to back it). The
-// debug override forces it on regardless for DevTools testing.
-function compassSupported() {
-  if (compassForced()) return true;
-  if (typeof window.DeviceOrientationEvent === 'undefined') return false;
-  try {
-    return (
-      window.matchMedia('(pointer: coarse)').matches ||
-      (navigator.maxTouchPoints || 0) > 0
-    );
-  } catch {
-    return (navigator.maxTouchPoints || 0) > 0;
-  }
-}
-
-// Derive a clockwise compass heading (0 = North) from an orientation event.
-// iOS provides a ready-made value; elsewhere we convert the absolute `alpha`
-// and correct for the current screen rotation so landscape still points right.
-// Returns null when the event doesn't carry a usable heading.
-function headingFromEvent(e) {
-  if (
-    typeof e.webkitCompassHeading === 'number' &&
-    !Number.isNaN(e.webkitCompassHeading)
-  ) {
-    return e.webkitCompassHeading;
-  }
-  if (typeof e.alpha === 'number' && e.alpha !== null) {
-    let screenAngle = 0;
-    if (screen.orientation && typeof screen.orientation.angle === 'number') {
-      screenAngle = screen.orientation.angle;
-    } else if (typeof window.orientation === 'number') {
-      screenAngle = window.orientation;
-    }
-    return ((360 - e.alpha + screenAngle) % 360 + 360) % 360;
-  }
-  return null;
-}
-
-function syncCompassButton() {
-  els.compass.setAttribute('aria-pressed', String(compassOn));
-  els.compass.title = compassOn ? 'Face North (turn off compass)' : 'Align radar to compass';
-}
-
-function stopCompass() {
-  for (const { name, fn } of compassBindings) {
-    window.removeEventListener(name, fn);
-  }
-  compassBindings = [];
-  clearTimeout(compassFixTimer);
-  compassFixTimer = null;
-  compassOn = false;
-  els.compass.classList.remove('compass-pending');
-  radar.disableHeading();
-  syncCompassButton();
-}
-
-async function startCompass() {
-  // iOS 13+ gates orientation behind an explicit permission prompt that must be
-  // triggered from a user gesture (this click handler).
-  if (
-    typeof DeviceOrientationEvent !== 'undefined' &&
-    typeof DeviceOrientationEvent.requestPermission === 'function'
-  ) {
-    try {
-      const res = await DeviceOrientationEvent.requestPermission();
-      if (res !== 'granted') {
-        setStatus('Compass permission denied.', 'warn');
-        return;
-      }
-    } catch {
-      setStatus('Compass unavailable on this device.', 'warn');
-      return;
-    }
-  }
-
-  const onOrientation = (e) => {
-    const heading = headingFromEvent(e);
-    if (heading == null) return;
-    // First good fix: drop the "acquiring" spinner.
-    if (compassFixTimer) {
-      clearTimeout(compassFixTimer);
-      compassFixTimer = null;
-      els.compass.classList.remove('compass-pending');
-    }
-    radar.setHeading(heading);
-  };
-
-  // Prefer the absolute (true-north-referenced) event on real hardware. Under
-  // the debug override also bind plain `deviceorientation`, which is what the
-  // DevTools Sensors emulator dispatches.
-  const names = [];
-  if ('ondeviceorientationabsolute' in window) names.push('deviceorientationabsolute');
-  if (compassForced() || names.length === 0) names.push('deviceorientation');
-  for (const name of names) {
-    window.addEventListener(name, onOrientation);
-    compassBindings.push({ name, fn: onOrientation });
-  }
-
-  compassOn = true;
-  els.compass.classList.add('compass-pending');
-  syncCompassButton();
-
-  // If no usable heading arrives shortly, the device can't actually orient the
-  // scope \u2014 back out cleanly rather than leaving it spinning forever. Skipped
-  // under the debug override, where the DevTools emulator only emits an event
-  // once you pick an orientation.
-  if (!compassForced()) {
-    compassFixTimer = setTimeout(() => {
-      if (compassOn && els.compass.classList.contains('compass-pending')) {
-        setStatus('No compass heading available on this device.', 'warn');
-        stopCompass();
-      }
-    }, 3500);
-  }
-}
-
-function wireCompass() {
-  if (!compassSupported()) return; // leave the button hidden
-  els.compass.hidden = false;
-  syncCompassButton();
-  els.compass.addEventListener('click', () => {
-    if (compassOn) stopCompass();
-    else startCompass();
-  });
-  // A rotated scope is disorienting when the tab returns from the background
-  // and the heading is stale; keep it running but it will re-sync on the next
-  // sensor event, so nothing extra is needed here.
-}
-
 // ---- Screen wake lock -----------------------------------------------------
 //
 // Keep the display awake on a wall-mounted tablet. The lock is dropped
@@ -4419,7 +4261,6 @@ async function poll() {
   wirePassport();
   wireFullscreen();
   wireSound();
-  wireCompass();
   wireWakeLock();
   wireDev();
   wireFocus();

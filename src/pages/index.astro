@@ -58,27 +58,6 @@
     </div>
 
     <button
-      id="compass-btn"
-      type="button"
-      class="fs-btn compass-btn"
-      title="Align radar to compass"
-      aria-label="Align radar to device compass"
-      aria-pressed="false"
-      hidden
-    >
-      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
-        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" />
-        <path
-          d="M12 5.5l2.4 6.1L12 18.5 9.6 11.6z"
-          fill="currentColor"
-          stroke="currentColor"
-          stroke-width="1"
-          stroke-linejoin="round"
-        />
-      </svg>
-    </button>
-
-    <button
       id="sound-btn"
       type="button"
       class="fs-btn sound-btn"
@@ -759,31 +738,6 @@
       .sound-btn[aria-pressed='false'] .snd-icon-on { display: none; }
       .sound-btn[aria-pressed='false'] .snd-icon-off { display: block; }
       .sound-btn[aria-pressed='true'] { opacity: 0.9; color: #baffd7; }
-
-      /* Compass toggle sits left of the sound button. Hidden until the device
-         is confirmed to expose orientation data (revealed by main.js). The
-         explicit [hidden] rule beats the .fs-btn display:flex above. */
-      .compass-btn { right: 106px; }
-      .fs-btn[hidden] { display: none; }
-      /* Active: a filled, glowing highlight so it's obvious at a glance that
-         the scope is locked to your heading. */
-      .compass-btn[aria-pressed='true'],
-      .compass-btn[aria-pressed='true']:hover {
-        opacity: 1;
-        color: #041b0d;
-        background: var(--green);
-        border-color: var(--green);
-        box-shadow: 0 0 14px rgba(0, 255, 120, 0.55);
-      }
-      /* While acquiring the first heading, pulse the highlight gently rather
-         than spinning the needle. */
-      .compass-btn.compass-pending { animation: compass-pulse 1.2s ease-in-out infinite; }
-      @keyframes compass-pulse {
-        50% { opacity: 0.55; box-shadow: 0 0 4px rgba(0, 255, 120, 0.25); }
-      }
-      @media (prefers-reduced-motion: reduce) {
-        .compass-btn.compass-pending { animation: none; }
-      }
 
       /* ---- Dev / demo panel ----------------------------------------------- */
       .dev-panel[hidden] { display: none; }
