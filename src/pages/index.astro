@@ -58,6 +58,27 @@
     </div>
 
     <button
+      id="compass-btn"
+      type="button"
+      class="fs-btn compass-btn"
+      title="Align radar to compass"
+      aria-label="Align radar to device compass"
+      aria-pressed="false"
+      hidden
+    >
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" />
+        <path
+          d="M12 5.5l2.4 6.1L12 18.5 9.6 11.6z"
+          fill="currentColor"
+          stroke="currentColor"
+          stroke-width="1"
+          stroke-linejoin="round"
+        />
+      </svg>
+    </button>
+
+    <button
       id="sound-btn"
       type="button"
       class="fs-btn sound-btn"
@@ -315,7 +336,6 @@
           <button type="button" class="passport-tab is-active" data-tab="countries" role="tab" aria-selected="true">Countries</button>
           <button type="button" class="passport-tab" data-tab="aircraft" role="tab" aria-selected="false">Aircraft</button>
           <button type="button" class="passport-tab" data-tab="airlines" role="tab" aria-selected="false">Airlines</button>
-          <button type="button" class="passport-tab" data-tab="routes" role="tab" aria-selected="false">Routes</button>
           <button type="button" class="passport-tab" data-tab="badges" role="tab" aria-selected="false">Badges</button>
           <button type="button" class="passport-tab" data-tab="stats" role="tab" aria-selected="false">Session</button>
         </div>
@@ -323,13 +343,13 @@
         <div id="passport-body" class="passport-body">
           <!-- Countries: world map + clickable detail + day-grouped list. -->
           <section id="tab-countries" class="passport-panel" role="tabpanel">
-            <p class="modal-hint modal-hint-sticky">Countries glow brighter the more flights cross your radar. Click a country (map or chip) to pin its flights.</p>
+            <p class="modal-hint modal-hint-sticky">Countries glow brighter the more flights cross your radar. Chips show origin &rarr; destination pairings &mdash; click one (or a country on the map) to pin its flights.</p>
             <div class="passport-crt">
               <div id="passport-map" class="map passport-map"></div>
             </div>
             <div id="passport-list" class="passport-list"></div>
             <div id="passport-country-detail" class="country-detail">
-              <p class="passport-hint">Select a country on the map or a chip above to see its flights.</p>
+              <p class="passport-hint">Select a route pairing above, or a country on the map, to see its flights.</p>
             </div>
           </section>
 
@@ -356,13 +376,6 @@
               </thead>
               <tbody id="airlines-body"></tbody>
             </table>
-          </section>
-
-          <!-- Country pairings: which origin -> destination routes your flights
-               connect most often. -->
-          <section id="tab-routes" class="passport-panel" role="tabpanel" hidden>
-            <p class="modal-hint modal-hint-sticky">The country pairings your flights connect most often &mdash; where they're coming from and heading to.</p>
-            <div id="routes-body" class="routes-body"></div>
           </section>
 
           <!-- Achievements / badges. -->
@@ -746,6 +759,31 @@
       .sound-btn[aria-pressed='false'] .snd-icon-on { display: none; }
       .sound-btn[aria-pressed='false'] .snd-icon-off { display: block; }
       .sound-btn[aria-pressed='true'] { opacity: 0.9; color: #baffd7; }
+
+      /* Compass toggle sits left of the sound button. Hidden until the device
+         is confirmed to expose orientation data (revealed by main.js). The
+         explicit [hidden] rule beats the .fs-btn display:flex above. */
+      .compass-btn { right: 106px; }
+      .fs-btn[hidden] { display: none; }
+      /* Active: a filled, glowing highlight so it's obvious at a glance that
+         the scope is locked to your heading. */
+      .compass-btn[aria-pressed='true'],
+      .compass-btn[aria-pressed='true']:hover {
+        opacity: 1;
+        color: #041b0d;
+        background: var(--green);
+        border-color: var(--green);
+        box-shadow: 0 0 14px rgba(0, 255, 120, 0.55);
+      }
+      /* While acquiring the first heading, pulse the highlight gently rather
+         than spinning the needle. */
+      .compass-btn.compass-pending { animation: compass-pulse 1.2s ease-in-out infinite; }
+      @keyframes compass-pulse {
+        50% { opacity: 0.55; box-shadow: 0 0 4px rgba(0, 255, 120, 0.25); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .compass-btn.compass-pending { animation: none; }
+      }
 
       /* ---- Dev / demo panel ----------------------------------------------- */
       .dev-panel[hidden] { display: none; }
@@ -1955,56 +1993,6 @@
       .session-tag-rare { color: #ffe08a; }
       .session-tag-mil { color: #8ac6ff; }
       .session-tag-emergency { color: #ff8a8a; }
-      /* ---- Routes (country pairings) ------------------------------------- */
-      .routes-body {
-        display: flex;
-        flex-direction: column;
-        gap: 18px;
-        padding: 14px;
-      }
-      .route-list {
-        display: flex;
-        flex-direction: column;
-        border: 1px solid rgba(0, 255, 120, 0.2);
-        border-radius: 8px;
-        overflow: hidden;
-        background: rgba(0, 40, 18, 0.25);
-      }
-      .route-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
-        padding: 10px 14px;
-        border-top: 1px solid rgba(0, 255, 120, 0.12);
-      }
-      .route-row:first-child { border-top: none; }
-      .route-endpoints {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-        font-size: 13px;
-        color: #d9ffec;
-      }
-      .route-ep { font-weight: 700; }
-      .route-arrow {
-        opacity: 0.6;
-        color: #9fe0bd;
-      }
-      .route-count {
-        flex: none;
-        min-width: 34px;
-        text-align: center;
-        font-size: 12px;
-        font-weight: 700;
-        color: #baffd7;
-        padding: 3px 10px;
-        border-radius: 999px;
-        border: 1px solid rgba(0, 255, 120, 0.3);
-        background: rgba(0, 255, 120, 0.08);
-        text-shadow: 0 0 8px rgba(0, 255, 120, 0.4);
-      }
       .session-badges {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

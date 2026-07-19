@@ -17,7 +17,7 @@ const DEG = Math.PI / 180;
 // Polled `distanceNm` / `bearingDeg` stay the API truth for alerts and logging.
 
 function lerpAngle(degA, degB, t) {
-  const d = (((degB - degA + 540) % 360) - 180);
+  const d = ((degB - degA + 540) % 360) - 180;
   return (degA + d * t + 360) % 360;
 }
 
@@ -584,7 +584,10 @@ export class Radar {
           targetB = adv.bearingDeg;
         }
       } else {
-        const extrapSec = Math.min(maxExtrap, Math.max(0, (now - fixAt) / 1000));
+        const extrapSec = Math.min(
+          maxExtrap,
+          Math.max(0, (now - fixAt) / 1000),
+        );
         const adv = advancePolar(
           fixD,
           fixB,
@@ -1503,11 +1506,7 @@ export class Radar {
     );
     const { d, bearing } = this._displayPos(b);
     const last = trail[trail.length - 1];
-    if (
-      strength > 0.05 &&
-      last &&
-      (last.d !== d || last.b !== bearing)
-    ) {
+    if (strength > 0.05 && last && (last.d !== d || last.b !== bearing)) {
       const bridgeD = last.d + (d - last.d) * strength;
       const bridgeB = lerpAngle(last.b, bearing, strength);
       if (bridgeD !== last.d || bridgeB !== last.b) {
@@ -1583,7 +1582,11 @@ export class Radar {
     // Helicopters ignore the size bucket and use one consistent scale.
     const classScale = isRotor
       ? 0.9
-      : sizeClass === "heavy" ? 1.4 : sizeClass === "light" ? 0.62 : 1;
+      : sizeClass === "heavy"
+        ? 1.4
+        : sizeClass === "light"
+          ? 0.62
+          : 1;
     const scale = (0.85 + glow * 0.35) * sizeFactor * classScale;
 
     ctx.save();
