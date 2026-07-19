@@ -479,6 +479,58 @@ function recordRouteCountries(route, aircraft) {
 const MAX_SESSION_SIGHTINGS = 1000;
 const session = { start: Date.now(), total: 0, sightings: [] };
 
+// Snapshot of the country ISOs already collected when this session began. Lets
+// the Session Stats panel tell which countries — and which continent badges —
+// are genuinely new this session rather than carried over from a past visit.
+let sessionStartCountryIsos = new Set(Object.keys(passport.countries));
+
+// Live tally of badges earned *during* this session. `baseline` is the set of
+// badge ids already earned before the session started; anything that becomes
+// earned afterwards lands in `earned` (in the order it happened) so the panel
+// can celebrate it.
+const sessionBadge = { baseline: new Set(), earned: [], earnedIds: new Set(), seeded: false };
+
+// The ids of continent-completion badges that are already complete given a
+// particular set of collected countries. Used to baseline continents from the
+// session's *starting* countries even though computeBadges() can only produce
+// continent badges once the map data (continentIndex) has loaded.
+function continentBadgeIdsCompleteAt(isoSet) {
+  const ids = new Set();
+  if (!continentIndex) return ids;
+  for (const cont of continentIndex) {
+    const need = cont.isos.size;
+    if (!need) continue;
+    let have = 0;
+    for (const iso of cont.isos) if (isoSet.has(iso)) have += 1;
+    if (have >= need) ids.add(`continent-${cont.name.toLowerCase().replace(/\s+/g, '-')}`);
+  }
+  return ids;
+}
+
+// Reconcile the session badge tally with the current passport. Idempotent:
+// safe to call on every passport change. On the first call it establishes the
+// pre-session baseline; on later calls it records any newly earned badge.
+function syncSessionBadges() {
+  const badges = computeBadges();
+  if (!sessionBadge.seeded) {
+    for (const b of badges) {
+      if (b.earned && !b.id.startsWith('continent-')) sessionBadge.baseline.add(b.id);
+    }
+    sessionBadge.seeded = true;
+  }
+  // Continent badges only exist once map data loads, so keep baselining the
+  // ones that were already complete from the session's starting countries.
+  for (const id of continentBadgeIdsCompleteAt(sessionStartCountryIsos)) sessionBadge.baseline.add(id);
+
+  for (const b of badges) {
+    if (!b.earned) continue;
+    if (sessionBadge.baseline.has(b.id)) continue;
+    if (sessionBadge.earnedIds.has(b.id)) continue;
+    sessionBadge.earnedIds.add(b.id);
+    sessionBadge.earned.push({ id: b.id, name: b.name, detail: b.detail || '', t: Date.now() });
+  }
+}
+
 // Operator-name tidy: mirror the radar's title-casing so the airline book and
 // stats read the same as the on-scope cards ("BRITISH AIRWAYS" -> "British
 // Airways"). Kept local (radar's copy isn't exported).
@@ -632,7 +684,10 @@ function flushSightings() {
   let changed = false;
   for (const b of sightingQueue) changed = recordOneSighting(b) || changed;
   sightingQueue.length = 0;
-  if (changed) savePassport();
+  if (changed) {
+    savePassport();
+    syncSessionBadges();
+  }
   // If the passport modal is open, keep its live tabs fresh.
   if (!els.passportModal.hidden) refreshOpenPassportTab();
 }
@@ -1913,22 +1968,88 @@ function renderBadgesTab() {
   grid.appendChild(wrap);
 }
 
-// ---- Session / day stats --------------------------------------------------
+// ---- Session stats --------------------------------------------------------
+
+// Short wall-clock time, e.g. "14:32". Used for "first tracked / latest" lines.
+function fmtClock(t) {
+  return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Most frequent non-empty value in a list, plus how often it occurred.
+function modeOf(values) {
+  const counts = new Map();
+  for (const v of values) if (v) counts.set(v, (counts.get(v) || 0) + 1);
+  let key = '';
+  let count = 0;
+  for (const [k, c] of counts) if (c > count) { count = c; key = k; }
+  return { key, count };
+}
 
 function renderStatsTab() {
   const body = els.statsBody;
   if (!body) return;
+  syncSessionBadges();
   body.innerHTML = '';
 
-  const stats = [];
   const s = session.sightings;
 
-  stats.push({ label: 'Contacts this session', value: String(session.total) });
+  // Nothing caught yet: a friendly holding message beats a wall of zeroes.
+  if (session.total === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'session-empty';
+    empty.textContent = 'No contacts yet this session. Everything you catch will be tallied here live \u2014 keep the scope running.';
+    body.appendChild(empty);
+    return;
+  }
 
-  // Session duration.
-  const mins = Math.max(0, Math.round((Date.now() - session.start) / 60000));
+  // ---- Small DOM helpers -------------------------------------------------
+  const addSection = (title, count) => {
+    const sec = document.createElement('section');
+    sec.className = 'session-section';
+    const h = document.createElement('h3');
+    h.className = 'session-section-title';
+    h.textContent = count == null ? title : `${title} (${count})`;
+    sec.appendChild(h);
+    body.appendChild(sec);
+    return sec;
+  };
+  const addRows = (sec, rows) => {
+    const list = document.createElement('div');
+    list.className = 'session-rows';
+    for (const r of rows) {
+      if (!r || !r.value) continue;
+      const row = document.createElement('div');
+      row.className = 'session-row';
+      const l = document.createElement('span');
+      l.className = 'session-row-label';
+      l.textContent = r.label;
+      const v = document.createElement('span');
+      v.className = 'session-row-value';
+      v.textContent = r.value;
+      if (r.tag) {
+        const tag = document.createElement('span');
+        tag.className = `session-tag session-tag-${r.tag.toLowerCase()}`;
+        tag.textContent = r.tag;
+        v.appendChild(tag);
+      }
+      row.append(l, v);
+      list.appendChild(row);
+    }
+    if (list.children.length) sec.appendChild(list);
+  };
+
+  // ---- Derived figures ---------------------------------------------------
+  const now = Date.now();
+  const elapsedMs = Math.max(0, now - session.start);
+  const mins = Math.round(elapsedMs / 60000);
   const dur = mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`;
-  stats.push({ label: 'Session length', value: dur });
+  const perHour = session.total / Math.max(1 / 60, elapsedMs / 3600000);
+  const rateStr = perHour >= 10 ? String(Math.round(perHour)) : perHour.toFixed(1);
+
+  const uniqTypes = new Set(s.map((it) => it.ty).filter(Boolean));
+  const uniqAirlines = new Set(s.map((it) => it.airline).filter(Boolean));
+  const uniqCountries = new Set(s.map((it) => it.origin && it.origin.iso).filter(Boolean));
+  const newCountryIsos = [...uniqCountries].filter((iso) => !sessionStartCountryIsos.has(iso));
 
   // Busiest bearing (most common 16-point compass sector).
   const hist = new Array(16).fill(0);
@@ -1937,59 +2058,136 @@ function renderStatsTab() {
   }
   let bestI = -1;
   for (let i = 0; i < 16; i++) if (hist[i] > (bestI < 0 ? 0 : hist[bestI])) bestI = i;
-  stats.push({
-    label: 'Busiest bearing',
-    value: bestI >= 0 ? `${COMPASS_16[bestI]} (${hist[bestI]})` : '\u2014',
-  });
 
-  // Farthest origin seen this session.
+  // Standouts across the session's sightings.
   let far = null;
-  for (const it of s) {
-    if (it.originDistNm != null && (!far || it.originDistNm > far.originDistNm)) far = it;
-  }
-  stats.push({
-    label: 'Farthest origin',
-    value: far ? `${far.origin?.name || '\u2014'} \u00b7 ${Math.round(far.originDistNm).toLocaleString()} nm` : '\u2014',
-  });
-
-  // Rarest catch today.
-  const todayKey = dayKeyOf(Date.now());
+  let closest = null;
+  let highest = null;
   let rarest = null;
   let rarestScore = -Infinity;
   for (const it of s) {
-    if (dayKeyOf(it.t) !== todayKey) continue;
+    if (it.originDistNm != null && (!far || it.originDistNm > far.originDistNm)) far = it;
+    if (typeof it.distanceNm === 'number' && it.distanceNm >= 0 && (!closest || it.distanceNm < closest.distanceNm)) closest = it;
+    if (typeof it.altFt === 'number' && (!highest || it.altFt > highest.altFt)) highest = it;
     const sc = rarityScore(it);
-    if (sc > rarestScore) {
-      rarestScore = sc;
-      rarest = it;
-    }
+    if (sc > rarestScore) { rarestScore = sc; rarest = it; }
   }
-  let rarestVal = '\u2014';
-  if (rarest) {
-    const tag = rarest.emergency ? 'EMERGENCY' : rarest.rare ? 'RARE' : rarest.mil ? 'MIL' : '';
-    const id = rarest.ty || rarest.reg || rarest.airline || 'contact';
-    rarestVal = tag ? `${id} (${tag})` : id;
-  }
-  stats.push({ label: 'Rarest catch today', value: rarestVal });
 
-  // Unique types / airlines this session.
-  const uniqTypes = new Set(s.map((it) => it.ty).filter(Boolean)).size;
-  const uniqAirlines = new Set(s.map((it) => it.airline).filter(Boolean)).size;
-  stats.push({ label: 'Unique types (session)', value: String(uniqTypes) });
-  stats.push({ label: 'Unique airlines (session)', value: String(uniqAirlines) });
+  const typeMode = modeOf(s.map((it) => it.ty));
+  const airlineMode = modeOf(s.map((it) => it.airline));
 
-  for (const st of stats) {
+  const milCount = s.filter((it) => it.mil).length;
+  const rareCount = s.filter((it) => it.rare).length;
+  const emgCount = s.filter((it) => it.emergency).length;
+
+  const nameOf = (it) => (it && (it.model || it.ty || it.airline || it.reg)) || 'contact';
+  const contactWord = (n) => `${n} contact${n === 1 ? '' : 's'}`;
+
+  // ---- Section: the headline numbers ------------------------------------
+  const heroSec = addSection('This session');
+  const hero = document.createElement('div');
+  hero.className = 'session-hero';
+  const heroCards = [
+    { value: String(session.total), label: 'Contacts' },
+    { value: dur, label: 'On watch' },
+    { value: `${rateStr}/hr`, label: 'Contact rate' },
+    { value: String(uniqTypes.size), label: 'Aircraft types' },
+    { value: String(uniqAirlines.size), label: 'Airlines' },
+    { value: String(uniqCountries.size), label: 'Origin countries' },
+  ];
+  for (const c of heroCards) {
     const card = document.createElement('div');
     card.className = 'stat-card';
     const v = document.createElement('div');
     v.className = 'stat-value';
-    v.textContent = st.value;
+    v.textContent = c.value;
     const l = document.createElement('div');
     l.className = 'stat-label';
-    l.textContent = st.label;
-    card.appendChild(v);
-    card.appendChild(l);
-    body.appendChild(card);
+    l.textContent = c.label;
+    card.append(v, l);
+    hero.appendChild(card);
+  }
+  heroSec.appendChild(hero);
+
+  // ---- Section: the standout catches ------------------------------------
+  const highSec = addSection('Highlights');
+  addRows(highSec, [
+    {
+      label: 'Rarest catch',
+      value: rarest ? nameOf(rarest) : '',
+      tag: rarest ? (rarest.emergency ? 'EMERGENCY' : rarest.rare ? 'RARE' : rarest.mil ? 'MIL' : '') : '',
+    },
+    { label: 'Most-seen type', value: typeMode.key ? `${typeMode.key} \u00d7${typeMode.count}` : '' },
+    { label: 'Most-seen airline', value: airlineMode.key ? `${airlineMode.key} \u00d7${airlineMode.count}` : '' },
+    { label: 'Busiest bearing', value: bestI >= 0 ? `${COMPASS_16[bestI]} \u00b7 ${contactWord(hist[bestI])}` : '' },
+    { label: 'Farthest origin', value: far ? `${far.origin?.name || '\u2014'} \u00b7 ${Math.round(far.originDistNm).toLocaleString()} nm` : '' },
+    { label: 'Closest pass', value: closest ? `${closest.distanceNm.toFixed(1)} nm \u00b7 ${nameOf(closest)}` : '' },
+    { label: 'Highest contact', value: highest ? `${highest.altFt.toLocaleString()} ft \u00b7 ${nameOf(highest)}` : '' },
+  ]);
+
+  // ---- Section: activity texture ----------------------------------------
+  const actSec = addSection('Activity');
+  let specialVal = '';
+  if (milCount || rareCount || emgCount) {
+    specialVal = [
+      milCount ? `${milCount} military` : '',
+      rareCount ? `${rareCount} rare` : '',
+      emgCount ? `${emgCount} emergency` : '',
+    ].filter(Boolean).join(' \u00b7 ');
+  } else {
+    specialVal = 'None';
+  }
+  let newCountriesVal = '';
+  if (newCountryIsos.length) {
+    const names = newCountryIsos
+      .map((iso) => (passport.countries[iso] && passport.countries[iso].n) || iso)
+      .slice(0, 4);
+    const extra = newCountryIsos.length - names.length;
+    newCountriesVal = `${newCountryIsos.length} \u00b7 ${names.join(', ')}${extra > 0 ? ` +${extra}` : ''}`;
+  } else {
+    newCountriesVal = 'None new';
+  }
+  addRows(actSec, [
+    { label: 'First tracked', value: s.length ? fmtClock(s[0].t) : '' },
+    { label: 'Latest contact', value: s.length ? fmtClock(s[s.length - 1].t) : '' },
+    { label: 'Special contacts', value: specialVal },
+    { label: 'New countries', value: newCountriesVal },
+  ]);
+
+  // ---- Section: badges earned this session ------------------------------
+  const badgeSec = addSection('Badges collected this session', sessionBadge.earned.length);
+  if (sessionBadge.earned.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'session-empty session-empty-inline';
+    empty.textContent = 'No new badges yet \u2014 rare types, records and milestones you unlock now will appear here.';
+    badgeSec.appendChild(empty);
+  } else {
+    const wrap = document.createElement('div');
+    wrap.className = 'session-badges';
+    // Most recent first so the latest unlock leads.
+    for (const b of [...sessionBadge.earned].reverse()) {
+      const tile = document.createElement('div');
+      tile.className = 'badge is-earned';
+      const star = document.createElement('span');
+      star.className = 'badge-star';
+      star.textContent = '\u2605';
+      const name = document.createElement('span');
+      name.className = 'badge-name';
+      name.textContent = b.name;
+      tile.append(star, name);
+      if (b.detail) {
+        const detail = document.createElement('span');
+        detail.className = 'badge-detail';
+        detail.textContent = b.detail;
+        tile.appendChild(detail);
+      }
+      const when = document.createElement('span');
+      when.className = 'badge-when';
+      when.textContent = `Earned ${fmtClock(b.t)}`;
+      tile.appendChild(when);
+      wrap.appendChild(tile);
+    }
+    badgeSec.appendChild(wrap);
   }
 }
 
@@ -2088,6 +2286,9 @@ async function openPassport() {
   // the tab currently showing (it renders before the async geo arrives).
   if (geo && !continentIndex) {
     continentIndex = buildContinentIndex(geo);
+    // Now that continent badges can compute, fold any session-completed ones
+    // into the live tally (baselining those already complete at session start).
+    syncSessionBadges();
     if (activePassportTab === 'badges') renderBadgesTab();
   }
 
@@ -2141,6 +2342,13 @@ function resetPassport() {
   session.total = 0;
   session.sightings.length = 0;
   session.start = Date.now();
+  // Reset session badge/country tracking against the now-empty passport.
+  sessionStartCountryIsos = new Set();
+  sessionBadge.baseline.clear();
+  sessionBadge.earned.length = 0;
+  sessionBadge.earnedIds.clear();
+  sessionBadge.seeded = false;
+  syncSessionBadges();
   refreshOpenPassportTab();
   if (passportGeoLayer) passportGeoLayer.setStyle(styleForFeature);
 }
@@ -2681,6 +2889,9 @@ async function poll() {
   wireSound();
   wireWakeLock();
   wireDev();
+  // Establish the pre-session badge baseline before any contacts roll in, so
+  // only badges earned during this session get celebrated in the panel.
+  syncSessionBadges();
   // A location the user picked before takes precedence over auto-geolocation.
   const saved = loadSavedCenter();
   if (saved) {

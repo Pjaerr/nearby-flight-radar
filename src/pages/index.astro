@@ -279,7 +279,7 @@
           <button type="button" class="passport-tab" data-tab="aircraft" role="tab" aria-selected="false">Aircraft</button>
           <button type="button" class="passport-tab" data-tab="airlines" role="tab" aria-selected="false">Airlines</button>
           <button type="button" class="passport-tab" data-tab="badges" role="tab" aria-selected="false">Badges</button>
-          <button type="button" class="passport-tab" data-tab="stats" role="tab" aria-selected="false">Stats</button>
+          <button type="button" class="passport-tab" data-tab="stats" role="tab" aria-selected="false">Session</button>
         </div>
 
         <div class="passport-body">
@@ -1340,12 +1340,98 @@
         text-shadow: 0 0 8px rgba(0, 255, 120, 0.35);
       }
 
-      /* ---- Session / day stats ------------------------------------------- */
+      /* ---- Session stats ------------------------------------------------- */
       .stats-body {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        padding: 14px;
+      }
+      .session-section {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .session-section-title {
+        margin: 0;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #baffd7;
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.4);
+      }
+      .session-hero {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 10px;
+      }
+      .session-rows {
+        display: flex;
+        flex-direction: column;
+        border: 1px solid rgba(0, 255, 120, 0.2);
+        border-radius: 8px;
+        overflow: hidden;
+        background: rgba(0, 40, 18, 0.25);
+      }
+      .session-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 14px;
+        border-top: 1px solid rgba(0, 255, 120, 0.12);
+      }
+      .session-row:first-child { border-top: none; }
+      .session-row-label {
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.65;
+        color: #9fe0bd;
+      }
+      .session-row-value {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        font-weight: 700;
+        color: #d9ffec;
+        text-align: right;
+      }
+      .session-tag {
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        padding: 2px 6px;
+        border-radius: 999px;
+        border: 1px solid currentColor;
+      }
+      .session-tag-rare { color: #ffe08a; }
+      .session-tag-mil { color: #8ac6ff; }
+      .session-tag-emergency { color: #ff8a8a; }
+      .session-badges {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
         gap: 10px;
-        padding: 14px;
+      }
+      .badge-when {
+        font-size: 10px;
+        opacity: 0.75;
+        color: #9fe0bd;
+      }
+      .session-empty {
+        padding: 24px 14px;
+        text-align: center;
+        font-size: 12px;
+        line-height: 1.5;
+        color: #9fe0bd;
+        opacity: 0.7;
+      }
+      .session-empty-inline {
+        margin: 0;
+        padding: 4px 2px;
+        text-align: left;
       }
       .stat-card {
         padding: 12px 14px;
