@@ -141,6 +141,19 @@
             </dd>
           </div>
         </dl>
+        <!-- Nearest-airport readout: a single subtle line with the same
+             aerodrome icon used on the scope, the airport identity, and its
+             current weather (Open-Meteo, keyless + CORS-enabled). Populated by
+             main.js; hidden until data arrives. -->
+        <p id="wx-line" class="wx" hidden aria-live="polite">
+          <svg class="wx-icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+            <circle cx="12" cy="12" r="6" fill="none" stroke="currentColor" stroke-width="1.8" />
+            <line x1="6.5" y1="17.5" x2="17.5" y2="6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          </svg>
+          <span class="wx-caption">NEAREST AIRPORT</span>
+          <span id="wx-code" class="wx-code"></span>
+          <span id="wx-text" class="wx-text"></span>
+        </p>
       </header>
 
       <section class="scope">
@@ -267,8 +280,12 @@
     <div id="passport-modal" class="modal" role="dialog" aria-modal="true" aria-label="Flight passport" hidden>
       <div class="modal-card passport-card">
         <div class="modal-head">
-          <span>FLIGHT PASSPORT</span>
+          <div class="modal-title">
+            <span>FLIGHT PASSPORT</span>
+            <span id="passport-opened" class="passport-opened"></span>
+          </div>
           <div class="modal-head-actions">
+            <button id="passport-share" type="button" class="passport-reset passport-share">Share card</button>
             <button id="passport-reset" type="button" class="passport-reset">Reset</button>
             <button id="passport-close" type="button" class="icon-btn" aria-label="Close">&times;</button>
           </div>
@@ -282,7 +299,7 @@
           <button type="button" class="passport-tab" data-tab="stats" role="tab" aria-selected="false">Session</button>
         </div>
 
-        <div class="passport-body">
+        <div id="passport-body" class="passport-body">
           <!-- Countries: world map + clickable detail + day-grouped list. -->
           <section id="tab-countries" class="passport-panel" role="tabpanel">
             <p class="modal-hint modal-hint-sticky">Countries glow brighter the more flights cross your radar. Click a country (map or chip) to pin its flights.</p>
@@ -332,6 +349,40 @@
           </section>
         </div>
       </div>
+    </div>
+
+    <!-- Shareable passport card: a client-side canvas snapshot of this session's
+         stats, rendered on demand into an <img> for preview + download/share. -->
+    <div id="passport-share-modal" class="modal" role="dialog" aria-modal="true" aria-label="Shareable passport card" hidden>
+      <div class="modal-card share-card">
+        <div class="modal-head">
+          <span>SHARE PASSPORT</span>
+          <div class="modal-head-actions">
+            <button id="passport-share-close" type="button" class="icon-btn" aria-label="Close">&times;</button>
+          </div>
+        </div>
+        <div class="share-body">
+          <div class="share-preview">
+            <img id="passport-share-img" alt="Your flight passport session summary card" />
+          </div>
+          <div class="share-actions">
+            <button id="passport-share-native" type="button" class="range-apply share-native" hidden>Share&hellip;</button>
+            <button id="passport-share-download" type="button" class="range-apply">Download PNG</button>
+          </div>
+          <p class="modal-hint share-hint">Your all-time passport with every country, aircraft, airline and badge you&rsquo;ve collected. </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Expanded aircraft photo (Planespotters). Sits above the passport modal;
+         the photographer credit + link back are required by the API terms. -->
+    <div id="photo-lightbox" class="photo-lightbox" role="dialog" aria-modal="true" aria-label="Aircraft photo" hidden>
+      <figure class="photo-lightbox-figure">
+        <button id="photo-lightbox-close" type="button" class="icon-btn photo-lightbox-close" aria-label="Close">&times;</button>
+        <span id="photo-lightbox-title" class="photo-lightbox-title"></span>
+        <img id="photo-lightbox-img" class="photo-lightbox-img" src="" alt="" />
+        <figcaption id="photo-lightbox-credit" class="photo-lightbox-credit"></figcaption>
+      </figure>
     </div>
 
     <script>
@@ -406,6 +457,49 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      /* Nearest-airport readout: one subtle line under the HUD boxes (no
+         container), with the scope's aerodrome icon, the airport, and its
+         weather. Truncates with an ellipsis rather than growing on small
+         screens. */
+      .wx {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin: 8px 2px 0;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        color: #9fe0bd;
+        white-space: nowrap;
+        overflow: hidden;
+      }
+      .wx[hidden] { display: none; }
+      .wx-icon {
+        flex: none;
+        color: var(--green);
+        opacity: 0.85;
+      }
+      .wx-caption {
+        flex: none;
+        font-size: 9px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        opacity: 0.5;
+      }
+      .wx-code {
+        flex: none;
+        font-weight: 700;
+        color: #baffd7;
+        letter-spacing: 0.04em;
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.4);
+      }
+      /* The long part shrinks and ellipsizes so the row never overflows. */
+      .wx-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        opacity: 0.8;
       }
       .scope {
         flex: 1;
@@ -1000,6 +1094,19 @@
         align-items: center;
         gap: 10px;
       }
+      .modal-title {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+      }
+      .passport-opened {
+        font-size: 9px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: rgba(0, 255, 120, 0.5);
+      }
+      .passport-opened:empty { display: none; }
       .passport-reset {
         font: inherit;
         font-size: 10px;
@@ -1021,6 +1128,50 @@
         outline: 2px solid rgba(0, 255, 120, 0.5);
         outline-offset: 2px;
       }
+      /* Share reuses the subtle outlined look of Reset but keeps the friendly
+         green hover (Reset goes red because it's destructive). */
+      .passport-share:hover {
+        background: rgba(0, 255, 120, 0.16);
+        border-color: rgba(0, 255, 120, 0.55);
+        color: #d9ffec;
+      }
+
+      /* Share-card preview modal: a portrait canvas rendered to an <img>. */
+      .share-card { max-width: 460px; }
+      .share-body {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 16px 16px 8px;
+      }
+      .share-preview {
+        display: flex;
+        justify-content: center;
+        max-height: 64vh;
+        overflow: auto;
+      }
+      .share-preview img {
+        width: 100%;
+        max-width: 360px;
+        height: auto;
+        border: 1px solid rgba(0, 255, 120, 0.3);
+        border-radius: 8px;
+        box-shadow: 0 0 24px rgba(0, 255, 120, 0.2);
+      }
+      .share-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+      .share-actions .range-apply { padding: 9px 18px; }
+      .share-native {
+        color: var(--green);
+        background: transparent;
+        border: 1px solid rgba(0, 255, 120, 0.45);
+      }
+      .share-native:hover { background: rgba(0, 255, 120, 0.14); filter: none; }
+      .share-hint { text-align: center; }
       .passport-list {
         display: flex;
         flex-direction: column;
@@ -1278,6 +1429,123 @@
         opacity: 0.5;
         font-size: 12px;
       }
+
+      /* ---- Aircraft thumbnails (Planespotters) ---------------------------- */
+      .log-photo-cell {
+        width: 68px;
+        padding: 5px 6px 5px 14px !important;
+      }
+      .log-photo {
+        width: 56px;
+        height: 38px;
+        border-radius: 4px;
+        overflow: hidden;
+        background: rgba(0, 255, 120, 0.05);
+        border: 1px solid rgba(0, 255, 120, 0.15);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      /* A faint pulse while the thumbnail is being fetched. */
+      .log-photo.is-loading {
+        background:
+          linear-gradient(100deg, rgba(0, 255, 120, 0.04) 30%, rgba(0, 255, 120, 0.14) 50%, rgba(0, 255, 120, 0.04) 70%)
+          rgba(0, 255, 120, 0.05);
+        background-size: 200% 100%;
+        animation: log-photo-shimmer 1.1s ease-in-out infinite;
+      }
+      @keyframes log-photo-shimmer {
+        from { background-position: 200% 0; }
+        to { background-position: -200% 0; }
+      }
+      /* No photo available: a small camera-off style dash. */
+      .log-photo.is-empty {
+        border-style: dashed;
+        opacity: 0.4;
+      }
+      .log-photo.is-empty::after {
+        content: '\2014';
+        font-size: 12px;
+        color: var(--green);
+      }
+      .log-photo-btn {
+        display: block;
+        width: 100%;
+        height: 100%;
+        padding: 0;
+        border: none;
+        background: transparent;
+        cursor: zoom-in;
+      }
+      .log-photo-img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        transition: transform 0.2s ease;
+      }
+      .log-photo-btn:hover .log-photo-img { transform: scale(1.08); }
+      .log-photo-btn:focus-visible {
+        outline: 2px solid var(--green);
+        outline-offset: 1px;
+      }
+
+      /* ---- Photo lightbox ------------------------------------------------- */
+      .photo-lightbox[hidden] { display: none; }
+      .photo-lightbox {
+        position: fixed;
+        inset: 0;
+        z-index: 1100;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(0, 6, 3, 0.82);
+        backdrop-filter: blur(2px);
+      }
+      .photo-lightbox-figure {
+        position: relative;
+        margin: 0;
+        max-width: min(560px, 92vw);
+        background: #041a0d;
+        border: 1px solid rgba(0, 255, 120, 0.4);
+        border-radius: 8px;
+        box-shadow: 0 0 30px rgba(0, 255, 120, 0.2);
+        padding: 12px;
+      }
+      .photo-lightbox-close {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        z-index: 1;
+      }
+      .photo-lightbox-title {
+        display: block;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: #baffd7;
+        margin: 2px 28px 8px 2px;
+        text-shadow: 0 0 8px rgba(0, 255, 120, 0.4);
+      }
+      .photo-lightbox-img {
+        display: block;
+        max-width: 100%;
+        max-height: 60vh;
+        border-radius: 4px;
+        background: rgba(0, 255, 120, 0.05);
+      }
+      .photo-lightbox-credit {
+        margin-top: 8px;
+        font-size: 11px;
+        opacity: 0.85;
+        color: #a9e8c4;
+      }
+      .photo-lightbox-credit a {
+        color: var(--green);
+        text-decoration: underline;
+      }
+      .photo-lightbox-credit a:hover { opacity: 0.85; }
 
       /* ---- Badges --------------------------------------------------------- */
       .badges-head {

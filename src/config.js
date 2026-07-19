@@ -60,6 +60,14 @@ export const CONFIG = {
   // the choice is remembered.
   soundEnabled: false,
 
+  // ---- Overhead / zenith alert ---------------------------------------------
+  // When a contact passes within this horizontal distance (nautical miles)
+  // while airborne, it's effectively straight overhead — the "look up NOW"
+  // moment. We fire the radar ping in a rapid burst to grab your attention.
+  // Only audible when sound is enabled.
+  overheadAlertEnabled: true,
+  overheadRadiusNm: 0.5,
+
   // ---- Auto-recovery -------------------------------------------------------
   // When a poll fails, retry with exponential backoff up to this ceiling (ms)
   // instead of hammering the API, then snap back to `pollIntervalMs` on the

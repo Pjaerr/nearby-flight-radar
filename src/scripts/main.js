@@ -1,6 +1,15 @@
 import { CONFIG } from '../config.js';
 import { Radar, describeAircraft } from './radar.js';
-import { fetchNearbyAircraft, lookupRoute, cachedRouteFor, RARE_TYPES } from './api.js';
+import {
+  fetchNearbyAircraft,
+  lookupRoute,
+  cachedRouteFor,
+  fetchAircraftPhoto,
+  cachedAircraftPhoto,
+  fetchWeather,
+  RARE_TYPES,
+} from './api.js';
+import { airportsWithin, nearestAirport, airportCode } from './airports.js';
 import { RadarAudio } from './audio.js';
 
 const SLIDER_MAX = 50; // nm; airplanes.live caps a /point query at 250 nm
@@ -57,8 +66,23 @@ const els = {
   passportMap: document.getElementById('passport-map'),
   passportList: document.getElementById('passport-list'),
   passportReset: document.getElementById('passport-reset'),
+  passportShare: document.getElementById('passport-share'),
+  passportOpened: document.getElementById('passport-opened'),
   passportTabs: document.getElementById('passport-tabs'),
+  // Shareable session-summary card (canvas snapshot + preview modal).
+  shareModal: document.getElementById('passport-share-modal'),
+  shareClose: document.getElementById('passport-share-close'),
+  shareImg: document.getElementById('passport-share-img'),
+  shareDownload: document.getElementById('passport-share-download'),
+  shareNative: document.getElementById('passport-share-native'),
+  passportBody: document.getElementById('passport-body'),
   passportCountryDetail: document.getElementById('passport-country-detail'),
+  // Aircraft-photo lightbox (Planespotters).
+  photoLightbox: document.getElementById('photo-lightbox'),
+  photoLightboxImg: document.getElementById('photo-lightbox-img'),
+  photoLightboxCredit: document.getElementById('photo-lightbox-credit'),
+  photoLightboxTitle: document.getElementById('photo-lightbox-title'),
+  photoLightboxClose: document.getElementById('photo-lightbox-close'),
   // Tab panels + their content mounts.
   tabCountries: document.getElementById('tab-countries'),
   tabAircraft: document.getElementById('tab-aircraft'),
@@ -71,6 +95,10 @@ const els = {
   airlinesBody: document.getElementById('airlines-body'),
   badgesGrid: document.getElementById('badges-grid'),
   statsBody: document.getElementById('stats-body'),
+  // Nearest-airport readout in the HUD.
+  wxLine: document.getElementById('wx-line'),
+  wxCode: document.getElementById('wx-code'),
+  wxText: document.getElementById('wx-text'),
   // Screen-reader regions: a polite live log and a mirrored aircraft list.
   srLive: document.getElementById('sr-live'),
   srList: document.getElementById('sr-aircraft-list'),
@@ -158,6 +186,11 @@ function loadSoundPref() {
 
 const audio = new RadarAudio({ muted: !loadSoundPref() });
 
+// Hexes of contacts currently inside the overhead radius. Used to fire the
+// zenith alert once as a contact enters, then re-arm only after it leaves (so a
+// plane loitering overhead doesn't machine-gun the burst every poll).
+const overheadActive = new Set();
+
 let currentRange = loadSavedRange();
 const radar = new Radar(els.canvas, {
   rangeNm: currentRange,
@@ -221,6 +254,7 @@ function loadSavedRange() {
 // entry (schema v3):
 //   {
 //     v: 3,
+//     opened: <ms>,   // when this passport was first started (or reset)
 //     countries: { "GB": { n, c, first, last, flights: [ {t,cs,reg,ty,op,md,role,from,to} ] } },
 //     types:     { "A388": { n:"AIRBUS A380-800", c, first, last, rare, mil, size } },
 //     airlines:  { "British Airways": { c, first, last } },
@@ -291,7 +325,23 @@ function emptyRecords() {
 }
 
 function emptyPassport() {
-  return { v: 3, countries: {}, types: {}, airlines: {}, regs: {}, records: emptyRecords() };
+  return { v: 3, opened: Date.now(), countries: {}, types: {}, airlines: {}, regs: {}, records: emptyRecords() };
+}
+
+// Earliest "first seen" timestamp across every logbook, used to backfill the
+// passport's opened date for saves made before that field existed.
+function earliestSeen(p) {
+  let min = Infinity;
+  const scan = (obj) => {
+    for (const e of Object.values(obj || {})) {
+      if (e && typeof e.first === 'number') min = Math.min(min, e.first);
+    }
+  };
+  scan(p.countries);
+  scan(p.types);
+  scan(p.airlines);
+  scan(p.regs);
+  return Number.isFinite(min) ? min : null;
 }
 
 // Bring any older/legacy shape up to the current v3 schema. v2 kept only
@@ -317,19 +367,25 @@ function migratePassport(raw) {
   }
 
   if (raw.v === 3) {
-    return {
+    const p = {
       v: 3,
+      opened: typeof raw.opened === 'number' ? raw.opened : 0,
       countries,
       types: raw.types && typeof raw.types === 'object' ? raw.types : {},
       airlines: raw.airlines && typeof raw.airlines === 'object' ? raw.airlines : {},
       regs: raw.regs && typeof raw.regs === 'object' ? raw.regs : {},
       records: { ...emptyRecords(), ...(raw.records || {}) },
     };
+    // Backfill the opened date for saves made before the field existed: use the
+    // earliest sighting on record, falling back to now for an empty passport.
+    if (!p.opened) p.opened = earliestSeen(p) || Date.now();
+    return p;
   }
 
   // v2 (or legacy) -> v3: keep countries, rebuild the logbooks from flights.
-  const p = { v: 3, countries, types: {}, airlines: {}, regs: {}, records: emptyRecords() };
+  const p = { v: 3, opened: 0, countries, types: {}, airlines: {}, regs: {}, records: emptyRecords() };
   backfillLogbooks(p);
+  p.opened = earliestSeen(p) || Date.now();
   return p;
 }
 
@@ -414,6 +470,11 @@ function savePassport() {
     /* ignore */
   }
 }
+
+// Persist immediately on load so a freshly-created passport's opened date (and
+// any schema migration/backfill) is stored and stays stable across sessions,
+// even if no contacts are logged this run.
+savePassport();
 
 // Record one sighting of a country from a route endpoint, optionally storing
 // the specific flight that visited it. Returns true when a valid two-letter
@@ -867,6 +928,8 @@ function applyRange(nm) {
   // the polling clock so the scheduled poll doesn't double-fire right after.
   setStatus(`Scanning ${currentRange} nm\u2026`, 'info');
   restartPolling();
+  // The set of airports within the scope changed with the range.
+  refreshAirportOverlay();
 }
 
 function wireRangePicker() {
@@ -883,6 +946,17 @@ function wireRangePicker() {
   });
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
+    // The photo lightbox sits on top of the passport, so Escape dismisses it
+    // first without also closing the passport underneath.
+    if (els.photoLightbox && !els.photoLightbox.hidden) {
+      closePhotoLightbox();
+      return;
+    }
+    // The share card sits above the passport, so Escape dismisses it first.
+    if (els.shareModal && !els.shareModal.hidden) {
+      closeSharePassport();
+      return;
+    }
     if (!els.modal.hidden) closeRangePicker();
     if (!els.centerModal.hidden) closeCenterPicker();
     if (!els.passportModal.hidden) closePassport();
@@ -1029,6 +1103,8 @@ function applyCenter(c) {
   updateAircraftList();
   setStatus('Scanning new area\u2026', 'info');
   restartPolling();
+  // New center: refresh the airport overlay and nearest-airport weather.
+  refreshLocationData();
 }
 
 function wireCenterPicker() {
@@ -1571,6 +1647,93 @@ function renderLogHead(thead, labels) {
 // data rather than changing the layout.
 let aircraftGroupBy = 'type';
 
+// The most-seen registration we've logged of a given type, used to show a
+// representative photo in the "by type" view (Planespotters looks photos up by
+// registration/hex, never by bare type code). Returns '' when we've logged the
+// type but never captured a tail for it.
+function repRegForType(typeCode) {
+  const code = (typeCode || '').toUpperCase();
+  let best = '';
+  let bestCount = -1;
+  for (const [reg, e] of Object.entries(passport.regs)) {
+    if ((e.ty || '').toUpperCase() === code && (e.c || 0) > bestCount) {
+      bestCount = e.c || 0;
+      best = reg;
+    }
+  }
+  return best;
+}
+
+// One shared observer so thumbnails only fetch as their row scrolls into the
+// passport body, rather than firing a request per logged airframe on open.
+// Re-created each render (rows are rebuilt) and scoped to the scrolling body.
+let aircraftPhotoObserver = null;
+
+function loadPhotoInto(holder) {
+  const reg = holder.dataset.reg;
+  if (!reg) return;
+  fetchAircraftPhoto(reg).then((photo) => {
+    // The tab may have been re-rendered (grouping toggled) while awaiting, so
+    // only paint holders still attached to the document.
+    if (holder.isConnected) fillPhotoHolder(holder, photo);
+  });
+}
+
+// Paint a thumbnail holder from a resolved photo (or null for "no photo").
+function fillPhotoHolder(holder, photo) {
+  holder.classList.remove('is-loading');
+  holder.innerHTML = '';
+  if (!photo || !photo.thumb) {
+    holder.classList.add('is-empty');
+    holder.title = 'No photo available';
+    return;
+  }
+  holder.classList.remove('is-empty');
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'log-photo-btn';
+  btn.setAttribute('aria-label', `Enlarge photo of ${holder.dataset.label || holder.dataset.reg}`);
+  const img = document.createElement('img');
+  img.className = 'log-photo-img';
+  img.src = photo.thumb.src;
+  img.alt = '';
+  img.loading = 'lazy';
+  img.decoding = 'async';
+  if (photo.thumb.width) img.width = photo.thumb.width;
+  if (photo.thumb.height) img.height = photo.thumb.height;
+  btn.appendChild(img);
+  btn.addEventListener('click', () => openPhotoLightbox(photo, holder.dataset.label || holder.dataset.reg));
+  holder.appendChild(btn);
+}
+
+// Build the leading photo cell for a logbook row. `reg` is the registration to
+// look up (a real tail, or a representative one for a type); `label` names the
+// airframe for the lightbox/aria text. An empty `reg` yields a quiet placeholder.
+function makePhotoCell(reg, label) {
+  const td = document.createElement('td');
+  td.className = 'log-photo-cell';
+  const holder = document.createElement('div');
+  holder.className = 'log-photo';
+  td.appendChild(holder);
+  if (!reg) {
+    holder.classList.add('is-empty');
+    holder.title = 'No photo available';
+    return td;
+  }
+  holder.dataset.reg = reg;
+  if (label) holder.dataset.label = label;
+  // Paint instantly from cache; otherwise defer the fetch until the row is seen.
+  const cached = cachedAircraftPhoto(reg);
+  if (cached === undefined) {
+    holder.classList.add('is-loading');
+    if (aircraftPhotoObserver) aircraftPhotoObserver.observe(holder);
+    else loadPhotoInto(holder);
+  } else {
+    fillPhotoHolder(holder, cached);
+  }
+  return td;
+}
+
 function renderAircraftTab() {
   const head = els.aircraftHead;
   const tbody = els.aircraftBody;
@@ -1578,23 +1741,78 @@ function renderAircraftTab() {
 
   const byType = aircraftGroupBy !== 'reg';
   if (head) {
-    renderLogHead(head, byType ? ['Type', 'Model', 'Rarity', 'Seen'] : ['Registration', 'Type', 'Rarity', 'Seen']);
+    renderLogHead(head, byType ? ['Photo', 'Type', 'Model', 'Rarity', 'Seen'] : ['Photo', 'Registration', 'Type', 'Rarity', 'Seen']);
+  }
+
+  if (aircraftPhotoObserver) aircraftPhotoObserver.disconnect();
+  if ('IntersectionObserver' in window) {
+    aircraftPhotoObserver = new IntersectionObserver((entries, obs) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        obs.unobserve(entry.target);
+        loadPhotoInto(entry.target);
+      }
+    }, { root: els.passportBody || null, rootMargin: '250px' });
+  } else {
+    aircraftPhotoObserver = null;
   }
 
   tbody.innerHTML = '';
   const rows = logbookRows(byType ? passport.types : passport.regs);
   if (!rows.length) {
-    renderEmptyRow(tbody, 4, byType ? 'No aircraft types logged yet.' : 'No registrations logged yet.');
+    renderEmptyRow(tbody, 5, byType ? 'No aircraft types logged yet.' : 'No registrations logged yet.');
     return;
   }
   for (const r of rows) {
     const tr = document.createElement('tr');
+    const photoReg = byType ? repRegForType(r.key) : r.key;
+    tr.appendChild(makePhotoCell(photoReg, r.key));
     tr.appendChild(makeCell(r.key, 'log-code'));
     tr.appendChild(makeCell((byType ? r.n : r.ty) || '\u2014', 'log-name'));
     tr.appendChild(rarityTagCell(r.rare, r.mil));
     tr.appendChild(makeCell(r.c, 'log-count'));
     tbody.appendChild(tr);
   }
+}
+
+// ---- Aircraft photo lightbox ----------------------------------------------
+// Expands a thumbnail to the larger Planespotters photo. Per the API terms the
+// photographer is credited in visible text and the image links back to its page
+// on Planespotters via a plain anchor.
+function openPhotoLightbox(photo, label) {
+  const box = els.photoLightbox;
+  if (!box || !photo) return;
+  const img = els.photoLightboxImg;
+  if (img) {
+    img.src = (photo.large && photo.large.src) || photo.thumb.src;
+    img.alt = label ? `Photo of ${label}` : 'Aircraft photo';
+  }
+  if (els.photoLightboxTitle) els.photoLightboxTitle.textContent = label || '';
+  if (els.photoLightboxCredit) {
+    els.photoLightboxCredit.innerHTML = '';
+    const who = photo.photographer
+      ? `Photo \u00a9 ${photo.photographer}`
+      : 'Photo';
+    if (photo.link) {
+      const a = document.createElement('a');
+      a.href = photo.link;
+      a.target = '_blank';
+      // Plain anchor as required by the Planespotters terms (no rel="nofollow");
+      // noopener/noreferrer omitted intentionally so the link is a plain credit.
+      a.textContent = `${who} \u2014 view on Planespotters`;
+      els.photoLightboxCredit.appendChild(a);
+    } else {
+      els.photoLightboxCredit.textContent = who;
+    }
+  }
+  box.hidden = false;
+}
+
+function closePhotoLightbox() {
+  const box = els.photoLightbox;
+  if (!box) return;
+  box.hidden = true;
+  if (els.photoLightboxImg) els.photoLightboxImg.src = '';
 }
 
 function renderAirlinesTab() {
@@ -2191,6 +2409,463 @@ function renderStatsTab() {
   }
 }
 
+// ---- Shareable passport card ----------------------------------------------
+//
+// A pure client-side image of the whole passport: all-time contacts, countries
+// (with flags), aircraft, airlines, standout records and earned badges, drawn
+// onto an off-screen canvas styled like the CRT scope. The user can download it
+// or hand it to the OS share sheet. Nothing leaves the device.
+
+const CARD_W = 1080;
+const CARD_H = 1600;
+
+// Distil the persistent passport into the all-time figures, ranked country
+// list (with flags), standout records and earned badges the card shows.
+function computePassportSummary() {
+  const p = passport;
+  const rec = p.records || {};
+  const sumC = (obj) => Object.values(obj).reduce((a, e) => a + ((e && e.c) || 0), 0);
+
+  const countryCount = Object.keys(p.countries).length;
+  const typeCount = Object.keys(p.types).length;
+  const airlineCount = Object.keys(p.airlines).length;
+  const regCount = Object.keys(p.regs).length;
+  // No single lifetime counter is stored; each sighting bumps the type, airline
+  // and registration books, so the largest of those sums is the best estimate
+  // of total contacts logged (some contacts lack a type/reg/operator).
+  const totalContacts = Math.max(sumC(p.types), sumC(p.regs), sumC(p.airlines));
+
+  // Countries ranked by flights logged, each with its flag + display name.
+  const countries = Object.entries(p.countries)
+    .map(([iso, e]) => ({
+      iso,
+      c: (e && e.c) || 0,
+      name: (e && e.n) || iso,
+      flag: flagEmoji(iso),
+      first: e && e.first,
+    }))
+    .sort((a, b) => b.c - a.c || a.iso.localeCompare(b.iso));
+
+  // Earliest first-seen anywhere in the books => "collecting since".
+  let since = Infinity;
+  for (const e of Object.values(p.countries)) if (e && e.first) since = Math.min(since, e.first);
+  for (const e of Object.values(p.types)) if (e && e.first) since = Math.min(since, e.first);
+  if (!Number.isFinite(since)) since = null;
+
+  const topType = topEntry(p.types);
+  const topAirline = topEntry(p.airlines);
+  const topReg = topEntry(p.regs);
+  const a380 = p.types.A388;
+  const a380Count = a380 ? a380.c : 0;
+
+  // Only the badges actually earned (lifetime), newest-feeling first isn't
+  // meaningful here, so keep computeBadges' curated order.
+  const badges = computeBadges().filter((b) => b.earned);
+
+  // The viral one-liner, e.g. "1,284 contacts \u00b7 24 countries \u00b7 3 A380".
+  const bits = [`${totalContacts.toLocaleString()} contact${totalContacts === 1 ? '' : 's'}`];
+  if (countryCount) bits.push(`${countryCount} countr${countryCount === 1 ? 'y' : 'ies'}`);
+  if (a380Count) bits.push(`${a380Count} A380`);
+  else if (typeCount) bits.push(`${typeCount} type${typeCount === 1 ? '' : 's'}`);
+  const headline = bits.join('  \u00b7  ');
+
+  return {
+    totalContacts,
+    countryCount,
+    typeCount,
+    airlineCount,
+    regCount,
+    countries,
+    since,
+    opened: p.opened || since || Date.now(),
+    topType,
+    topAirline,
+    topReg,
+    a380Count,
+    rec,
+    badges,
+    headline,
+    when: Date.now(),
+    empty: totalContacts === 0 && countryCount === 0,
+  };
+}
+
+// Make sure the mono display font is ready before we paint text onto the
+// canvas, otherwise the first render falls back to a system font.
+async function ensureCardFont() {
+  if (!document.fonts || !document.fonts.load) return;
+  try {
+    await Promise.all([
+      document.fonts.load("16px 'Share Tech Mono'"),
+      document.fonts.load("48px 'Share Tech Mono'"),
+    ]);
+    await document.fonts.ready;
+  } catch {
+    /* font best-effort; system mono is an acceptable fallback */
+  }
+}
+
+const CARD_FONT = "'Share Tech Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace";
+
+// Draw the full passport card onto the given 2D context.
+function drawPassportCard(ctx, W, H, sum) {
+  const green = '#00ff78';
+  const bright = '#d9ffec';
+  const mid = '#baffd7';
+  const muted = '#6fbf95';
+  const pad = 72;
+
+  // Small drawing helpers ---------------------------------------------------
+  const text = (str, x, y, { size = 20, color = mid, align = 'left', spacing = 0, glow = 0 } = {}) => {
+    ctx.save();
+    ctx.font = `${size}px ${CARD_FONT}`;
+    ctx.textAlign = align;
+    ctx.textBaseline = 'alphabetic';
+    if ('letterSpacing' in ctx) ctx.letterSpacing = `${spacing}px`;
+    if (glow) { ctx.shadowColor = 'rgba(0,255,120,0.6)'; ctx.shadowBlur = glow; }
+    ctx.fillStyle = color;
+    ctx.fillText(str, x, y);
+    ctx.restore();
+  };
+  const measure = (str, size, spacing = 0) => {
+    ctx.save();
+    ctx.font = `${size}px ${CARD_FONT}`;
+    if ('letterSpacing' in ctx) ctx.letterSpacing = `${spacing}px`;
+    const w = ctx.measureText(str).width;
+    ctx.restore();
+    return w;
+  };
+  const roundRect = (x, y, w, h, r) => {
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+    else {
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+  };
+  const panel = (x, y, w, h, r, fill, stroke) => {
+    ctx.save();
+    roundRect(x, y, w, h, r);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.lineWidth = 1.5; ctx.strokeStyle = stroke; ctx.stroke(); }
+    ctx.restore();
+  };
+  const ellipsize = (str, size, maxW, spacing = 0) => {
+    if (measure(str, size, spacing) <= maxW) return str;
+    let out = str;
+    while (out.length > 1 && measure(`${out}\u2026`, size, spacing) > maxW) out = out.slice(0, -1);
+    return `${out}\u2026`;
+  };
+
+  // Background: deep-green radial wash over near-black. ----------------------
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#04170c');
+  bg.addColorStop(1, '#020a05');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+  const glow = ctx.createRadialGradient(W * 0.5, H * 0.28, 40, W * 0.5, H * 0.28, W * 0.8);
+  glow.addColorStop(0, 'rgba(0,255,120,0.12)');
+  glow.addColorStop(1, 'rgba(0,255,120,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+
+  // Faint radar rings in the lower-right for scope flavour.
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0,255,120,0.06)';
+  ctx.lineWidth = 2;
+  for (let i = 1; i <= 5; i++) {
+    ctx.beginPath();
+    ctx.arc(W - pad * 0.4, H - pad * 0.4, i * 150, Math.PI, Math.PI * 1.5);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // CRT scanlines.
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.16)';
+  for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 2);
+  ctx.restore();
+
+  // Outer frame.
+  panel(20, 20, W - 40, H - 40, 18, null, 'rgba(0,255,120,0.28)');
+
+  // Header ------------------------------------------------------------------
+  ctx.save();
+  ctx.translate(pad, 96);
+  ctx.strokeStyle = green;
+  ctx.lineWidth = 3;
+  ctx.shadowColor = 'rgba(0,255,120,0.6)';
+  ctx.shadowBlur = 10;
+  ctx.beginPath(); ctx.arc(0, -8, 18, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(0, -8, 8, 18, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-18, -14); ctx.lineTo(18, -14); ctx.moveTo(-18, -2); ctx.lineTo(18, -2); ctx.stroke();
+  ctx.restore();
+  text('FLIGHT PASSPORT', pad + 42, 104, { size: 34, color: green, spacing: 3, glow: 12 });
+  text('NEARBY FLIGHT RADAR', pad + 42, 132, { size: 15, color: muted, spacing: 3 });
+
+  if (sum.opened) {
+    const openedStr = new Date(sum.opened).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase();
+    text('PASSPORT OPENED', W - pad, 100, { size: 15, color: muted, align: 'right', spacing: 2 });
+    text(openedStr, W - pad, 128, { size: 22, color: bright, align: 'right' });
+  }
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0,255,120,0.22)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(pad, 162); ctx.lineTo(W - pad, 162); ctx.stroke();
+  ctx.restore();
+
+  // Headline one-liner ------------------------------------------------------
+  text('ALL-TIME', pad, 214, { size: 20, color: muted, spacing: 6 });
+  let hSize = 58;
+  while (hSize > 28 && measure(sum.headline, hSize, 1) > W - pad * 2) hSize -= 2;
+  text(sum.headline, pad, 214 + hSize, { size: hSize, color: bright, spacing: 1, glow: 14 });
+
+  // Stat grid (3 x 2) -------------------------------------------------------
+  const gridTop = 320;
+  const gap = 22;
+  const cardW = (W - pad * 2 - gap * 2) / 3;
+  const cardH = 148;
+  const cards = [
+    { value: sum.totalContacts.toLocaleString(), label: 'CONTACTS' },
+    { value: String(sum.countryCount), label: 'COUNTRIES' },
+    { value: String(sum.typeCount), label: 'AIRCRAFT TYPES' },
+    { value: String(sum.airlineCount), label: 'AIRLINES' },
+    { value: sum.regCount.toLocaleString(), label: 'AIRCRAFT' },
+    { value: String(sum.badges.length), label: 'BADGES' },
+  ];
+  cards.forEach((c, i) => {
+    const cx = pad + (i % 3) * (cardW + gap);
+    const cy = gridTop + Math.floor(i / 3) * (cardH + gap);
+    panel(cx, cy, cardW, cardH, 12, 'rgba(0,40,18,0.42)', 'rgba(0,255,120,0.22)');
+    let vSize = 62;
+    const val = c.value || '0';
+    while (vSize > 26 && measure(val, vSize, 0) > cardW - 28) vSize -= 2;
+    text(val, cx + cardW / 2, cy + cardH / 2 + 8, { size: vSize, color: green, align: 'center', glow: 12 });
+    text(c.label, cx + cardW / 2, cy + cardH - 20, { size: 15, color: muted, align: 'center', spacing: 2 });
+  });
+
+  // Highlights panel: standout records from the whole passport. -------------
+  const hlTop = gridTop + cardH * 2 + gap + 34;
+  const rows = [];
+  const rec = sum.rec || {};
+  if (sum.topType.key) rows.push(['Most-seen type', `${sum.topType.key} \u00d7${sum.topType.count}`]);
+  if (sum.topAirline.key) rows.push(['Top airline', `${sum.topAirline.key} \u00d7${sum.topAirline.count}`]);
+  if (rec.highestAlt) rows.push(['Highest contact', `${rec.highestAlt.altFt.toLocaleString()} ft \u00b7 ${rec.highestAlt.ty || rec.highestAlt.cs || ''}`.trim()]);
+  if (rec.longestRoute) rows.push(['Longest route', `${rec.longestRoute.from}\u2192${rec.longestRoute.to} \u00b7 ${Math.round(rec.longestRoute.nm).toLocaleString()} nm`]);
+  if (rec.closest) rows.push(['Closest pass', `${rec.closest.nm.toFixed(1)} nm \u00b7 ${rec.closest.ty || rec.closest.cs || ''}`.trim()]);
+  if (rec.fastest) rows.push(['Fastest', `${Math.round(rec.fastest.kt).toLocaleString()} kt \u00b7 ${rec.fastest.ty || rec.fastest.cs || ''}`.trim()]);
+
+  const shownRows = rows.slice(0, 6);
+  const rowH = 52;
+  const hlH = 56 + Math.max(1, shownRows.length) * rowH + 14;
+  panel(pad, hlTop, W - pad * 2, hlH, 12, 'rgba(0,40,18,0.28)', 'rgba(0,255,120,0.2)');
+  text('HIGHLIGHTS', pad + 24, hlTop + 40, { size: 18, color: green, spacing: 3, glow: 8 });
+  if (shownRows.length === 0) {
+    text('Nothing logged yet \u2014 fire up the scope to start collecting.', pad + 24, hlTop + 40 + rowH, { size: 20, color: muted });
+  } else {
+    shownRows.forEach((r, i) => {
+      const ry = hlTop + 56 + i * rowH + 34;
+      text(r[0], pad + 24, ry, { size: 20, color: muted });
+      const maxVal = W - pad * 2 - 48 - measure(r[0], 20) - 40;
+      text(ellipsize(r[1], 22, maxVal), W - pad - 24, ry, { size: 22, color: bright, align: 'right' });
+    });
+  }
+
+  // Country flags: little passport stamps, wrapped over up to two rows. ------
+  let cursorY = hlTop + hlH + 42;
+  if (sum.countries.length) {
+    text('COUNTRIES', pad, cursorY, { size: 18, color: green, spacing: 3, glow: 8 });
+    text(`${sum.countryCount} collected`, W - pad, cursorY, { size: 15, color: muted, align: 'right', spacing: 1 });
+    cursorY += 22;
+    const tileW = 96;
+    const tileH = 84;
+    const tGap = 14;
+    const perRow = Math.max(1, Math.floor((W - pad * 2 + tGap) / (tileW + tGap)));
+    const maxRows = 2;
+    const capacity = perRow * maxRows;
+    const overflow = sum.countries.length - capacity;
+    const shown = sum.countries.slice(0, overflow > 0 ? capacity - 1 : capacity);
+    shown.forEach((c, i) => {
+      const col = i % perRow;
+      const row = Math.floor(i / perRow);
+      const tx = pad + col * (tileW + tGap);
+      const ty = cursorY + row * (tileH + tGap);
+      panel(tx, ty, tileW, tileH, 10, 'rgba(0,40,18,0.5)', 'rgba(0,255,120,0.28)');
+      if (c.flag) {
+        ctx.save();
+        ctx.font = `44px ${CARD_FONT}`;
+        ctx.textAlign = 'center';
+        ctx.fillText(c.flag, tx + tileW / 2, ty + 50);
+        ctx.restore();
+      } else {
+        text(c.iso, tx + tileW / 2, ty + 48, { size: 30, color: bright, align: 'center', glow: 8 });
+      }
+      text(c.iso, tx + tileW / 2, ty + tileH - 14, { size: 15, color: muted, align: 'center', spacing: 1 });
+    });
+    const rowsUsed = Math.ceil(shown.length / perRow);
+    cursorY += rowsUsed * (tileH + tGap);
+    if (overflow > 0) {
+      const col = shown.length % perRow;
+      const row = Math.floor(shown.length / perRow);
+      const tx = pad + col * (tileW + tGap);
+      const ty = cursorY - (rowsUsed - row) * (tileH + tGap);
+      panel(tx, ty, tileW, tileH, 10, 'rgba(0,40,18,0.35)', 'rgba(0,255,120,0.2)');
+      text(`+${overflow + 1}`, tx + tileW / 2, ty + tileH / 2 + 8, { size: 26, color: green, align: 'center' });
+      text('more', tx + tileW / 2, ty + tileH - 14, { size: 14, color: muted, align: 'center' });
+    }
+    cursorY += 30;
+  }
+
+  // Badges: gold star chips, wrapped, with a "+N more" overflow chip. --------
+  if (sum.badges.length) {
+    const gold = '#ffe08a';
+    text('BADGES EARNED', pad, cursorY, { size: 18, color: green, spacing: 3, glow: 8 });
+    text(`${sum.badges.length} unlocked`, W - pad, cursorY, { size: 15, color: muted, align: 'right', spacing: 1 });
+    cursorY += 24;
+    const chipH = 46;
+    const cGapX = 12;
+    const cGapY = 12;
+    const bSize = 20;
+    const maxChipW = W - pad * 2;
+    const items = sum.badges.map((b) => {
+      const label = ellipsize(`\u2605 ${b.name}`, bSize, maxChipW - 30);
+      return { label, w: Math.min(maxChipW, measure(label, bSize, 0) + 30) };
+    });
+    const bottomLimit = H - 110;
+    const maxRows = Math.max(1, Math.floor((bottomLimit - cursorY) / (chipH + cGapY)));
+    let cx = pad;
+    let row = 0;
+    let drawn = 0;
+    for (let i = 0; i < items.length; i++) {
+      const w = items[i].w;
+      // Wrap to a new row when the chip won't fit (but never on a fresh row). If
+      // there's no room for another row, stop *without* resetting cx so the
+      // "+N more" chip lands at the end of the last row rather than over it.
+      if (cx > pad && cx + w > W - pad) {
+        if (row + 1 >= maxRows) break;
+        row += 1;
+        cx = pad;
+      }
+      const rowY = cursorY + row * (chipH + cGapY);
+      // On the final row, stop early (leaving room for a "+N") if more remain.
+      const remaining = items.length - i;
+      if (row === maxRows - 1 && remaining > 1 && cx + w > W - pad - 120) break;
+      panel(cx, rowY, w, chipH, 8, 'rgba(0,40,18,0.5)', 'rgba(255,224,138,0.35)');
+      text(items[i].label, cx + 15, rowY + 30, { size: bSize, color: gold });
+      cx += w + cGapX;
+      drawn += 1;
+    }
+    const leftover = sum.badges.length - drawn;
+    if (leftover > 0) {
+      const rowY = cursorY + row * (chipH + cGapY);
+      const label = `+${leftover} more`;
+      const w = measure(label, bSize, 0) + 30;
+      const x = Math.min(cx, W - pad - w);
+      panel(x, rowY, w, chipH, 8, 'rgba(0,40,18,0.35)', 'rgba(255,224,138,0.25)');
+      text(label, x + 15, rowY + 30, { size: bSize, color: gold });
+    }
+  }
+
+  // Footer ------------------------------------------------------------------
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0,255,120,0.22)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(pad, H - 84); ctx.lineTo(W - pad, H - 84); ctx.stroke();
+  ctx.restore();
+  const host = (typeof location !== 'undefined' && location.host) || 'nearby flight radar';
+  const genStr = new Date(sum.when).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase();
+  text(host, pad, H - 50, { size: 20, color: green, spacing: 1, glow: 8 });
+  text(genStr, W - pad, H - 50, { size: 16, color: muted, align: 'right', spacing: 2 });
+}
+
+// Render the card to an off-screen canvas and return it.
+async function renderPassportCardCanvas() {
+  const sum = computePassportSummary();
+  const canvas = document.createElement('canvas');
+  canvas.width = CARD_W;
+  canvas.height = CARD_H;
+  const ctx = canvas.getContext('2d');
+  await ensureCardFont();
+  drawPassportCard(ctx, CARD_W, CARD_H, sum);
+  return { canvas, sum };
+}
+
+let lastCard = null; // { canvas, sum }
+
+function cardFileName() {
+  const d = new Date();
+  const pad2 = (n) => String(n).padStart(2, '0');
+  return `flight-passport-${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}.png`;
+}
+
+// Can the browser share generated image files via the OS share sheet?
+function canShareCardFiles() {
+  try {
+    if (!navigator.canShare) return false;
+    const probe = new File([new Blob([''], { type: 'image/png' })], 'p.png', { type: 'image/png' });
+    return navigator.canShare({ files: [probe] });
+  } catch {
+    return false;
+  }
+}
+
+async function openSharePassport() {
+  try {
+    lastCard = await renderPassportCardCanvas();
+    if (els.shareImg) els.shareImg.src = lastCard.canvas.toDataURL('image/png');
+    if (els.shareNative) els.shareNative.hidden = !canShareCardFiles();
+    if (els.shareModal) els.shareModal.hidden = false;
+  } catch (err) {
+    console.error('Could not build passport card', err);
+  }
+}
+
+function closeSharePassport() {
+  if (els.shareModal) els.shareModal.hidden = true;
+}
+
+function cardToBlob() {
+  return new Promise((resolve) => {
+    if (!lastCard) { resolve(null); return; }
+    lastCard.canvas.toBlob((blob) => resolve(blob), 'image/png');
+  });
+}
+
+async function downloadPassportCard() {
+  const blob = await cardToBlob();
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = cardFileName();
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function sharePassportCard() {
+  const blob = await cardToBlob();
+  if (!blob) return;
+  const file = new File([blob], cardFileName(), { type: 'image/png' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({
+        files: [file],
+        title: 'My Flight Passport',
+        text: lastCard ? `Nearby Flight Radar \u2014 ${lastCard.sum.headline}` : 'Nearby Flight Radar',
+      });
+    }
+  } catch {
+    /* user dismissed the share sheet, or it failed \u2014 nothing to do */
+  }
+}
+
 // ---- Tab switching --------------------------------------------------------
 
 const PASSPORT_PANELS = {
@@ -2244,8 +2919,21 @@ function showPassportTab(name) {
   }
 }
 
+// Refresh the small "Opened <date> · N days" line in the passport header.
+function updatePassportOpenedLabel() {
+  const el = els.passportOpened;
+  if (!el) return;
+  const opened = passport.opened;
+  if (!opened) { el.textContent = ''; return; }
+  const dateStr = new Date(opened).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' });
+  const days = Math.max(0, Math.floor((Date.now() - opened) / 86400000));
+  const ago = days <= 0 ? 'today' : days === 1 ? '1 day ago' : `${days} days ago`;
+  el.textContent = `Opened ${dateStr} \u00b7 ${ago}`;
+}
+
 async function openPassport() {
   els.passportModal.hidden = false;
+  updatePassportOpenedLabel();
   showPassportTab(activePassportTab);
 
   let L;
@@ -2349,6 +3037,7 @@ function resetPassport() {
   sessionBadge.earnedIds.clear();
   sessionBadge.seeded = false;
   syncSessionBadges();
+  updatePassportOpenedLabel();
   refreshOpenPassportTab();
   if (passportGeoLayer) passportGeoLayer.setStyle(styleForFeature);
 }
@@ -2364,6 +3053,16 @@ function wirePassport() {
   els.passportModal.addEventListener('click', (e) => {
     if (e.target === els.passportModal) closePassport();
   });
+  // Shareable session-summary card.
+  if (els.passportShare) els.passportShare.addEventListener('click', openSharePassport);
+  if (els.shareClose) els.shareClose.addEventListener('click', closeSharePassport);
+  if (els.shareModal) {
+    els.shareModal.addEventListener('click', (e) => {
+      if (e.target === els.shareModal) closeSharePassport();
+    });
+  }
+  if (els.shareDownload) els.shareDownload.addEventListener('click', downloadPassportCard);
+  if (els.shareNative) els.shareNative.addEventListener('click', sharePassportCard);
   // Tab bar.
   els.passportTabs.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-tab]');
@@ -2381,6 +3080,15 @@ function wirePassport() {
         b.setAttribute('aria-pressed', String(on));
       }
       renderAircraftTab();
+    });
+  }
+  // Aircraft-photo lightbox: close via its button or by clicking the backdrop.
+  if (els.photoLightboxClose) {
+    els.photoLightboxClose.addEventListener('click', closePhotoLightbox);
+  }
+  if (els.photoLightbox) {
+    els.photoLightbox.addEventListener('click', (e) => {
+      if (e.target === els.photoLightbox) closePhotoLightbox();
     });
   }
   // Clicking a day chip selects that country (mirrors a map click) and, on the
@@ -2738,6 +3446,90 @@ function wireDev() {
   });
 }
 
+// ---- Airport overlay + nearest-airport weather ----------------------------
+//
+// Both are backed by the bundled OurAirports subset (src/data/airports.json)
+// and refreshed whenever the center or range changes. The overlay is the set
+// of airports within the current range, drawn subtly on the scope; the weather
+// chip shows current conditions for the single nearest airport via Open-Meteo.
+
+// Fetch airports a little beyond the range too, so one just off the scope
+// still shows (drawn distinctly as "outside" by the radar) when your center is
+// right on the edge of it. The radar decides in/out against the true range.
+const AIRPORT_OVERSCAN = 1.15;
+
+// Refresh the subtle airport overlay for the current center + range.
+async function refreshAirportOverlay() {
+  try {
+    const list = await airportsWithin(center.lat, center.lon, currentRange * AIRPORT_OVERSCAN);
+    radar.setAirports(list);
+  } catch {
+    radar.setAirports([]);
+  }
+}
+
+// Conditions change slowly and Open-Meteo asks callers to be gentle, so the
+// weather is polled far less often than traffic.
+const WEATHER_REFRESH_MS = 10 * 60 * 1000;
+let weatherTimer = null;
+// Bumped on every refresh so a slow in-flight fetch from a previous center
+// can't overwrite the chip after the center has moved again.
+let weatherToken = 0;
+
+function renderWeatherChip(airport, wx) {
+  if (!els.wxLine) return;
+  if (!airport || !wx || (wx.tempC == null && !wx.condition && wx.windKt == null)) {
+    els.wxLine.hidden = true;
+    return;
+  }
+
+  // Code stays fixed-width (bold) at the start; everything else is one
+  // ellipsizing run so the row never overflows on small screens.
+  if (els.wxCode) els.wxCode.textContent = airportCode(airport);
+
+  // The code above already identifies the airport, so this run is just the
+  // weather: temperature, sky, and wind.
+  const parts = [];
+  if (wx.tempC != null) parts.push(`${Math.round(wx.tempC)}\u00b0C`);
+  if (wx.condition) parts.push(wx.condition);
+  if (wx.windKt != null) {
+    const dir = compassDir(wx.windDir);
+    const kt = Math.round(wx.windKt);
+    parts.push(kt === 0 ? 'calm' : dir ? `wind ${kt} kt ${dir}` : `wind ${kt} kt`);
+  }
+  if (els.wxText) els.wxText.textContent = parts.join('  \u00b7  ');
+
+  els.wxLine.hidden = false;
+}
+
+// Look up the nearest airport, fetch its current conditions, and paint the
+// chip. The token check drops a result that arrives after the center moved.
+async function refreshWeather() {
+  const token = ++weatherToken;
+  try {
+    const airport = await nearestAirport(center.lat, center.lon);
+    if (token !== weatherToken) return;
+    if (!airport) {
+      if (els.wxLine) els.wxLine.hidden = true;
+      return;
+    }
+    const wx = await fetchWeather(airport.lat, airport.lon);
+    if (token !== weatherToken) return;
+    renderWeatherChip(airport, wx);
+  } catch {
+    /* leave the chip as-is on a transient failure */
+  }
+}
+
+// Refresh both airport-derived features for the current center and (re)arm the
+// slow weather refresh timer. Called at startup and after a location change.
+function refreshLocationData() {
+  refreshAirportOverlay();
+  refreshWeather();
+  clearInterval(weatherTimer);
+  weatherTimer = setInterval(refreshWeather, WEATHER_REFRESH_MS);
+}
+
 // ---- Freshness tracking ---------------------------------------------------
 
 let lastUpdateAt = 0;
@@ -2813,6 +3605,44 @@ function restartPolling() {
 // current blips untouched \u2014 no update, no prune \u2014 so the contacts already on
 // the scope stay visible (and keep flaring under the sweep) while we wait out
 // a transient outage or rate limit. Never throws.
+// Fire the overhead / zenith alert for any airborne contact that has just
+// crossed inside the overhead radius — essentially straight over your head, the
+// "look up NOW" moment. We nudge with a rapid burst of the familiar ping rather
+// than a jarring new sound, and briefly re-flare the blip so the scope agrees
+// with your ears without turning into a klaxon. Fires once per entry: a contact
+// stays "active" until it leaves the radius, then re-arms.
+function checkOverhead(visible) {
+  if (!CONFIG.overheadAlertEnabled) return;
+  const radius = CONFIG.overheadRadiusNm;
+  const seen = new Set();
+
+  for (const a of visible) {
+    // Airborne (already filtered) and within the tight horizontal radius means
+    // it's effectively overhead. altFt is present for airborne contacts.
+    if (a.distanceNm == null || a.distanceNm > radius) continue;
+    if (a.altFt == null || a.altFt <= 0) continue;
+
+    seen.add(a.hex);
+    if (overheadActive.has(a.hex)) continue; // already alerted this pass
+    overheadActive.add(a.hex);
+
+    audio.overhead();
+    // Re-light the blip so the visual matches the audible nudge (reuses the
+    // existing sweep-cross flare — deliberately not a new, striking element).
+    const b = radar.blips.get(a.hex);
+    if (b) {
+      b.intensity = 1;
+      b.labelAlpha = 1;
+    }
+  }
+
+  // Drop anyone who has left the radius (or the scope) so they can re-alert on
+  // a future pass.
+  for (const hex of overheadActive) {
+    if (!seen.has(hex)) overheadActive.delete(hex);
+  }
+}
+
 async function poll() {
   try {
     const aircraft = await fetchNearbyAircraft(center.lat, center.lon, currentRange);
@@ -2831,6 +3661,7 @@ async function poll() {
 
     radar.update(visible);
     radar.prune(CONFIG.staleAfterSec);
+    checkOverhead(visible);
     updateAircraftList();
 
     lastUpdateAt = Date.now();
@@ -2901,5 +3732,8 @@ async function poll() {
     await resolveLocation();
   }
   restartPolling();
+  // Populate the airport overlay and nearest-airport weather for the resolved
+  // center, and arm the periodic weather refresh.
+  refreshLocationData();
   setInterval(tick, 1000);
 })();

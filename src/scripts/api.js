@@ -715,6 +715,246 @@ function countryNameFromIso(iso) {
   }
 }
 
+// ---- Aircraft photos (Planespotters public API) ---------------------------
+// The passport's Aircraft logbook shows a small photo of each airframe/type.
+// Planespotters.net offers a keyless, CORS-enabled public API that returns the
+// latest photo for a registration (or hex/Mode-S address). It only works from a
+// real browser context (the request must carry an `Origin`/`Referer` header,
+// which `fetch` sets automatically), so there's no server or proxy involved.
+//
+// Terms of use we must honour (https://www.planespotters.net/photo/api):
+//   - Load the image straight from the returned `thumbnail`/`thumbnail_large`
+//     URLs in the user's browser; never re-host or rewrite them.
+//   - Credit the photographer next to the image and link the thumbnail to the
+//     photo's page via the `link` URL (a plain anchor). The UI layer does this.
+//   - JSON responses may be cached for up to 24 hours.
+const PHOTOS_BASE = 'https://api.planespotters.net/pub/photos';
+const LS_PHOTOS_KEY = 'photos';
+// Cache a found photo for the full 24h the terms allow; re-check a "no photo"
+// answer sooner so a newly uploaded shot appears without a day-long wait.
+const PHOTO_POSITIVE_TTL_MS = 24 * 60 * 60 * 1000;
+const PHOTO_NEGATIVE_TTL_MS = 6 * 60 * 60 * 1000;
+
+// In-memory mirror of the consolidated localStorage entry, keyed by the lookup
+// id (registration or "hex:<addr>"): { "G-XLEB": { v: <photo|null>, e: ms } }.
+const photoMemory = new Map();
+// In-flight fetches keyed the same way, so the passport re-rendering on each
+// poll (or two rows sharing a representative reg) collapses onto one request.
+const photoInFlight = new Map();
+
+function loadPhotoStore() {
+  const store = {};
+  try {
+    const raw = localStorage.getItem(LS_PHOTOS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        const now = Date.now();
+        for (const [key, rec] of Object.entries(parsed)) {
+          if (rec && typeof rec.e === 'number' && rec.e > now) {
+            store[key] = { v: rec.v ?? null, e: rec.e };
+          }
+        }
+      }
+    }
+  } catch {
+    /* ignore malformed cache */
+  }
+  return store;
+}
+
+const photoStore = loadPhotoStore();
+
+function persistPhotoStore() {
+  try {
+    localStorage.setItem(LS_PHOTOS_KEY, JSON.stringify(photoStore));
+  } catch {
+    /* storage full or unavailable; ignore */
+  }
+}
+
+function cachePhoto(key, value) {
+  const expires = Date.now() + (value ? PHOTO_POSITIVE_TTL_MS : PHOTO_NEGATIVE_TTL_MS);
+  photoMemory.set(key, { value, expires });
+  photoStore[key] = { v: value ?? null, e: expires };
+  persistPhotoStore();
+}
+
+// Reduce one Planespotters thumbnail object to { src, width, height }, or null
+// when the shape is missing/unexpected. URLs are used verbatim per the terms.
+function pickThumb(t) {
+  const src = t && typeof t.src === 'string' ? t.src : '';
+  if (!src) return null;
+  const size = (t && t.size) || {};
+  return {
+    src,
+    width: Number.isFinite(size.width) ? size.width : null,
+    height: Number.isFinite(size.height) ? size.height : null,
+  };
+}
+
+// Normalize the API's first photo into the shape the passport renders, or null
+// when there's no usable photo.
+function normalizePhoto(data) {
+  const photo = data && Array.isArray(data.photos) ? data.photos[0] : null;
+  if (!photo) return null;
+  const thumb = pickThumb(photo.thumbnail);
+  const large = pickThumb(photo.thumbnail_large) || thumb;
+  if (!thumb) return null;
+  return {
+    thumb,
+    large,
+    link: typeof photo.link === 'string' ? photo.link : '',
+    photographer: typeof photo.photographer === 'string' ? photo.photographer : '',
+  };
+}
+
+/**
+ * Fetch the latest Planespotters photo for an aircraft, looked up by
+ * registration (default) or by hex/Mode-S address when `byHex` is true.
+ * Returns { thumb, large, link, photographer } or null when no photo exists.
+ * Results (including definitive "no photo" misses) are cached in memory and
+ * localStorage; transient failures are not cached so a later view retries.
+ * Never throws.
+ */
+export async function fetchAircraftPhoto(id, { byHex = false } = {}) {
+  const raw = (id || '').trim();
+  if (!raw) return null;
+  const key = byHex ? `hex:${raw.toLowerCase()}` : raw.toUpperCase();
+
+  const now = Date.now();
+  const mem = photoMemory.get(key);
+  if (mem && mem.expires > now) return mem.value;
+  const rec = photoStore[key];
+  if (rec && typeof rec.e === 'number' && rec.e > now) {
+    photoMemory.set(key, { value: rec.v ?? null, expires: rec.e });
+    return rec.v ?? null;
+  }
+
+  const pending = photoInFlight.get(key);
+  if (pending) return pending;
+
+  const path = byHex
+    ? `${PHOTOS_BASE}/hex/${encodeURIComponent(raw.toLowerCase())}`
+    : `${PHOTOS_BASE}/reg/${encodeURIComponent(raw.toUpperCase())}`;
+  const promise = (async () => {
+    try {
+      const res = await fetch(path, { headers: { Accept: 'application/json' } });
+      // Transient responses (rate limit, 5xx, the occasional 403 from a stripped
+      // header): don't cache, just retry when the row is viewed again.
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data && data.error) return null;
+      const photo = normalizePhoto(data);
+      cachePhoto(key, photo);
+      return photo;
+    } catch {
+      return null;
+    } finally {
+      photoInFlight.delete(key);
+    }
+  })();
+  photoInFlight.set(key, promise);
+  return promise;
+}
+
+// Non-fetching lookup of an already-cached photo, so a re-render can paint a
+// known thumbnail instantly without touching the network. Returns the photo,
+// null for a cached miss, or undefined when nothing is cached yet.
+export function cachedAircraftPhoto(id, { byHex = false } = {}) {
+  const raw = (id || '').trim();
+  if (!raw) return undefined;
+  const key = byHex ? `hex:${raw.toLowerCase()}` : raw.toUpperCase();
+  const now = Date.now();
+  const mem = photoMemory.get(key);
+  if (mem && mem.expires > now) return mem.value;
+  const rec = photoStore[key];
+  if (rec && typeof rec.e === 'number' && rec.e > now) return rec.v ?? null;
+  return undefined;
+}
+
+// ---- Nearest-airport weather (Open-Meteo) --------------------------------
+// The HUD shows current conditions for the nearest airport. aviationweather.gov
+// (the natural METAR source) doesn't send CORS headers, so a browser-only
+// static site can't read it directly \u2014 the same wall the route lookup hits with
+// adsb.lol's routeset endpoint. Open-Meteo is keyless, CORS-enabled and
+// worldwide, so we read current conditions from it (temperature, WMO weather
+// code, wind) at the airport's coordinates instead. No proxy, no key, no
+// backend, in keeping with the rest of the app.
+const WEATHER_BASE = 'https://api.open-meteo.com/v1/forecast';
+
+// WMO weather interpretation codes -> a short, HUD-friendly label. Grouped so
+// nearby variants (e.g. the drizzle intensities) read the same at a glance.
+// Reference: https://open-meteo.com/en/docs (WMO code table).
+const WMO_CODES = {
+  0: 'Clear',
+  1: 'Mainly clear',
+  2: 'Partly cloudy',
+  3: 'Overcast',
+  45: 'Fog',
+  48: 'Rime fog',
+  51: 'Light drizzle',
+  53: 'Drizzle',
+  55: 'Heavy drizzle',
+  56: 'Freezing drizzle',
+  57: 'Freezing drizzle',
+  61: 'Light rain',
+  63: 'Rain',
+  65: 'Heavy rain',
+  66: 'Freezing rain',
+  67: 'Freezing rain',
+  71: 'Light snow',
+  73: 'Snow',
+  75: 'Heavy snow',
+  77: 'Snow grains',
+  80: 'Light showers',
+  81: 'Showers',
+  82: 'Violent showers',
+  85: 'Snow showers',
+  86: 'Snow showers',
+  95: 'Thunderstorm',
+  96: 'Thunderstorm',
+  99: 'Thunderstorm',
+};
+
+export function weatherCodeLabel(code) {
+  return WMO_CODES[code] || '';
+}
+
+/**
+ * Fetch current conditions at (lat, lon) from Open-Meteo. Returns a normalized
+ * object { tempC, weatherCode, condition, windKt, windDir, humidity } or null
+ * on any failure. Never throws.
+ */
+export async function fetchWeather(lat, lon) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const params = new URLSearchParams({
+    latitude: String(lat),
+    longitude: String(lon),
+    current: 'temperature_2m,weather_code,wind_speed_10m,wind_direction_10m,relative_humidity_2m',
+    wind_speed_unit: 'kn',
+    temperature_unit: 'celsius',
+  });
+  try {
+    const res = await fetch(`${WEATHER_BASE}?${params}`, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const c = data && data.current;
+    if (!c) return null;
+    const code = typeof c.weather_code === 'number' ? c.weather_code : null;
+    return {
+      tempC: typeof c.temperature_2m === 'number' ? c.temperature_2m : null,
+      weatherCode: code,
+      condition: code != null ? weatherCodeLabel(code) : '',
+      windKt: typeof c.wind_speed_10m === 'number' ? c.wind_speed_10m : null,
+      windDir: typeof c.wind_direction_10m === 'number' ? c.wind_direction_10m : null,
+      humidity: typeof c.relative_humidity_2m === 'number' ? c.relative_humidity_2m : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // Normalize one airport from the route API's `_airports` array into the shape
 // the radar renders (city + codes + country for the flag and passport).
 function pickAirport(a) {

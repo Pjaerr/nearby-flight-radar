@@ -1,7 +1,9 @@
 // Opt-in radar sound, synthesized entirely with the Web Audio API so there are
-// no asset files to ship. Two sounds:
-//   - ping()  a short sonar blip fired as the sweep crosses a contact
-//   - chime() a soft two-note bell used to confirm sound has been enabled
+// no asset files to ship. Three sounds:
+//   - ping()     a short sonar blip fired as the sweep crosses a contact
+//   - overhead() the same blip in a rapid burst — the "look up NOW" alert for a
+//                contact passing almost directly overhead
+//   - chime()    a soft two-note bell used to confirm sound has been enabled
 //
 // Muted by default. The AudioContext is created lazily on the first unmute
 // (which happens from a user click) so browser autoplay policies are satisfied.
@@ -55,8 +57,32 @@ export class RadarAudio {
     const now = performance.now();
     if (now - this._lastPingAt < this._minPingGapMs) return;
     this._lastPingAt = now;
+    this._blip(ctx.currentTime);
+  }
 
+  // The overhead / zenith alert: the exact same blip, but fired several times
+  // in rapid succession — the audible "look up NOW" nudge for a contact passing
+  // almost directly over you. Deliberately not a new, jarring sound; just the
+  // familiar ping, urgent. Bypasses the sweep-cross throttle by scheduling the
+  // repeats ahead on the AudioContext clock.
+  overhead() {
+    if (this.muted) return;
+    const ctx = this._ensure();
+    if (!ctx) return;
     const t = ctx.currentTime;
+    const count = 4;
+    const gap = 0.14; // seconds between blips — tight enough to read as a burst
+    for (let i = 0; i < count; i++) this._blip(t + i * gap);
+    // Keep the sweep-cross throttle in sync so a coincident sweep ping doesn't
+    // pile straight on top of the burst.
+    this._lastPingAt = performance.now() + count * gap * 1000;
+  }
+
+  // Build one blip tone starting at AudioContext time `t`. Shared by the single
+  // sweep-cross ping and the rapid overhead burst.
+  _blip(t) {
+    const ctx = this.ctx;
+    if (!ctx) return;
 
     // Bandpass keeps the tone tight and "electronic". Its centre frequency
     // tracks the oscillator's doppler glide so the resonance follows the pitch.

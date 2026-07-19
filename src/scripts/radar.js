@@ -291,6 +291,13 @@ export class Radar {
     /** @type {Map<string, object>} keyed by aircraft hex */
     this.blips = new Map();
 
+    // Static airport overlay drawn beneath the traffic: a subtle "map" of the
+    // large/medium airports within range, each already annotated with its
+    // polar position relative to the center (distanceNm + bearingDeg). Set via
+    // setAirports() when the center or range changes; empty by default.
+    /** @type {Array<object>} */
+    this.airports = [];
+
     this.sweepAngle = 0; // radians, 0 = North, clockwise
     this.prevSweepAngle = 0;
     this.lastFrame = 0;
@@ -306,6 +313,15 @@ export class Radar {
 
   setRange(nm) {
     this.rangeNm = nm;
+  }
+
+  /**
+   * Replace the airport overlay set. Each entry needs `distanceNm` and
+   * `bearingDeg` (relative to the center) plus a display `iata`/`icao` code and
+   * a `kind` ('L' large | 'M' medium). Pass [] to clear.
+   */
+  setAirports(list) {
+    this.airports = Array.isArray(list) ? list : [];
   }
 
   /** Force a canvas resize (e.g. after toggling fullscreen layout). */
@@ -496,6 +512,7 @@ export class Radar {
 
     this._drawBackground(ctx, cx, cy, R);
     this._drawGrid(ctx, cx, cy, R);
+    this._drawAirports(ctx, cx, cy, R);
     this._drawSweep(ctx, cx, cy, R);
     this._drawBlips(ctx, cx, cy, R);
     this._drawCenter(ctx, cx, cy);
@@ -574,6 +591,73 @@ export class Radar {
       const ly = cy - Math.cos(rad) * (R + 12);
       ctx.fillText(label, lx, ly);
     }
+  }
+
+  // Subtle airport overlay: a simple aerodrome icon (a small circle with a
+  // runway strip) at each airport's polar position, with a faint code label on
+  // the nearest few so the map doesn't get cluttered. Drawn between the grid
+  // and the sweep so it reads as part of the dim "map" beneath the traffic, and
+  // the sweep wedge glides over it like a real PPI scope. Deliberately
+  // low-contrast so it never competes with the aircraft blips.
+  _drawAirports(ctx, cx, cy, R) {
+    const list = this.airports;
+    if (!list || list.length === 0) return;
+
+    // Only the nearest handful get a text label; the rest are markers only.
+    const LABEL_MAX = 7;
+    // Airports just beyond the range are drawn a touch outside the outer ring
+    // to make clear they're off-scope; cap the radius so an icon never spills
+    // past the round tube edge.
+    const maxR = cx - 3;
+
+    ctx.save();
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = `9px ${FONT_STACK}`;
+
+    for (let i = 0; i < list.length; i++) {
+      const ap = list[i];
+      if (typeof ap.distanceNm !== 'number' || typeof ap.bearingDeg !== 'number') continue;
+      // Un-clamped radius so airports past the range sit beyond the outer ring.
+      const rr = Math.max(0, ap.distanceNm / this.rangeNm) * R;
+      if (rr > maxR) continue; // too far outside to show without clipping
+      const rad = ap.bearingDeg * DEG;
+      const x = cx + Math.sin(rad) * rr;
+      const y = cy - Math.cos(rad) * rr;
+
+      const outside = ap.distanceNm > this.rangeNm;
+      const large = ap.kind === 'L';
+      const iconR = large ? 4.5 : 3.2;
+      // Outside-range airports are dimmer so they read as "just off the scope".
+      const alpha = (large ? 0.4 : 0.26) * (outside ? 0.6 : 1);
+
+      // Simple aerodrome symbol: a small circle. In-range airports get a solid
+      // ring plus a runway strip; outside-range ones get a dashed ring and no
+      // strip, so it's obvious at a glance they aren't within your radar.
+      ctx.strokeStyle = `rgba(0, 255, 120, ${alpha})`;
+      ctx.lineWidth = 1;
+      ctx.setLineDash(outside ? [2, 2] : []);
+      ctx.beginPath();
+      ctx.arc(x, y, iconR, 0, TAU);
+      ctx.stroke();
+      if (!outside) {
+        const rw = iconR + 2;
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        ctx.moveTo(x - rw * 0.7, y + rw * 0.7);
+        ctx.lineTo(x + rw * 0.7, y - rw * 0.7);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+
+      const code = ap.iata || ap.icao;
+      if (code && i < LABEL_MAX) {
+        ctx.fillStyle = `rgba(0, 255, 120, ${(large ? 0.5 : 0.34) * (outside ? 0.6 : 1)})`;
+        ctx.fillText(code, x + iconR + 4, y);
+      }
+    }
+
+    ctx.restore();
   }
 
   _drawSweep(ctx, cx, cy, R) {
