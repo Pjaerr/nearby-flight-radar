@@ -6,6 +6,7 @@ import {
   cachedRouteFor,
   fetchAircraftPhoto,
   cachedAircraftPhoto,
+  airlineLogoUrl,
   fetchWeather,
   RARE_TYPES,
 } from './api.js';
@@ -1815,17 +1816,55 @@ function closePhotoLightbox() {
   if (els.photoLightboxImg) els.photoLightboxImg.src = '';
 }
 
+// Build the leading logo cell for an airline row. The airline name is resolved
+// to an IATA code and Daisycon logo URL asynchronously (a single dataset load,
+// then synchronous lookups); the <img> itself lazy-loads natively as the row
+// scrolls into view. Airlines without a known IATA code get a quiet placeholder.
+function makeAirlineLogoCell(name) {
+  const td = document.createElement('td');
+  td.className = 'log-logo-cell';
+  const holder = document.createElement('div');
+  holder.className = 'log-logo is-loading';
+  td.appendChild(holder);
+  airlineLogoUrl(name).then((url) => {
+    // The tab may have been re-rendered while awaiting the dataset.
+    if (!holder.isConnected) return;
+    holder.classList.remove('is-loading');
+    if (!url) {
+      holder.classList.add('is-empty');
+      holder.title = 'No logo available';
+      return;
+    }
+    const img = document.createElement('img');
+    img.className = 'log-logo-img';
+    img.src = url;
+    img.alt = '';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    // Daisycon returns a placeholder for unknown carriers; if the request
+    // fails outright, fall back to the quiet dash rather than a broken image.
+    img.addEventListener('error', () => {
+      img.remove();
+      holder.classList.add('is-empty');
+      holder.title = 'No logo available';
+    });
+    holder.appendChild(img);
+  });
+  return td;
+}
+
 function renderAirlinesTab() {
   const tbody = els.airlinesBody;
   if (!tbody) return;
   tbody.innerHTML = '';
   const rows = logbookRows(passport.airlines);
   if (!rows.length) {
-    renderEmptyRow(tbody, 3, 'No airlines logged yet.');
+    renderEmptyRow(tbody, 4, 'No airlines logged yet.');
     return;
   }
   for (const r of rows) {
     const tr = document.createElement('tr');
+    tr.appendChild(makeAirlineLogoCell(r.key));
     tr.appendChild(makeCell(r.key, 'log-name'));
     tr.appendChild(makeCell(seenLabel(r.first), 'log-first'));
     tr.appendChild(makeCell(r.c, 'log-count'));

@@ -50,9 +50,12 @@ const AIRLINES_URL =
 const LS_AIRLINES_KEY = 'airlines';
 const AIRLINES_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-// Resolved code->name map once available, plus the in-flight load so concurrent
+// Resolved lookups once available, plus the in-flight load so concurrent
 // route lookups share a single fetch rather than each pulling the CSV.
+// airlineMap: code -> name (drives readable airline names on the radar).
+// airlineIataMap: name/code -> IATA code (drives the passport's logos).
 let airlineMap = null;
+let airlineIataMap = null;
 let airlineMapPromise = null;
 
 // Split one CSV line into fields, honouring double-quoted fields that may
@@ -93,11 +96,21 @@ function decodeEntities(s) {
     .replace(/&quot;/g, '"');
 }
 
-// Build a code->name Map from the CSV text. Columns: Code,Name,ICAO,IATA,...
-// Key by both the ICAO and the leading Code column (identical for the 3-letter
-// airline codes routes use) so either form resolves; ICAO wins on conflict.
+// Normalize an airline display name into a stable lookup key (lower-case,
+// single-spaced) so the logbook's stored name can be matched back to a code
+// regardless of incidental spacing/case differences.
+function normalizeAirlineName(name) {
+  return (name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// Parse the CSV text into two maps. Columns: Code,Name,ICAO,IATA,...
+//   names: code -> display name, keyed by both ICAO and the leading Code column
+//     (identical for the 3-letter airline codes routes use); ICAO wins on conflict.
+//   iatas: -> IATA code, keyed by the normalized name plus the ICAO/Code, so a
+//     logbook airline (stored by name) or a raw code can both resolve to a logo.
 function parseAirlineCsv(text) {
-  const map = new Map();
+  const names = new Map();
+  const iatas = new Map();
   const lines = text.split(/\r?\n/);
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
@@ -106,14 +119,24 @@ function parseAirlineCsv(text) {
     const code = (cols[0] || '').trim().toUpperCase();
     const name = decodeEntities((cols[1] || '').trim());
     const icao = (cols[2] || '').trim().toUpperCase();
+    const iata = (cols[3] || '').trim().toUpperCase();
     if (!name) continue;
-    if (icao && !map.has(icao)) map.set(icao, name);
-    if (code && !map.has(code)) map.set(code, name);
+    if (icao && !names.has(icao)) names.set(icao, name);
+    if (code && !names.has(code)) names.set(code, name);
+    // IATA airline codes are two alphanumerics (e.g. "BA", "U2").
+    if (/^[A-Z0-9]{2}$/.test(iata)) {
+      const nameKey = normalizeAirlineName(name);
+      if (nameKey && !iatas.has(nameKey)) iatas.set(nameKey, iata);
+      if (icao && !iatas.has(icao)) iatas.set(icao, iata);
+      if (code && !iatas.has(code)) iatas.set(code, iata);
+    }
   }
-  return map;
+  return { names, iatas };
 }
 
-// Restore a still-fresh map from localStorage, or null when absent/expired.
+// Restore still-fresh maps from localStorage, or null when absent/expired.
+// Both the name and IATA maps are stored together, so an older cache that
+// predates the IATA map (no `i`) is treated as stale and refetched once.
 function loadAirlineMapFromStorage() {
   try {
     const raw = localStorage.getItem(LS_AIRLINES_KEY);
@@ -121,9 +144,13 @@ function loadAirlineMapFromStorage() {
     const parsed = JSON.parse(raw);
     if (
       parsed && typeof parsed.e === 'number' && parsed.e > Date.now() &&
-      parsed.m && typeof parsed.m === 'object'
+      parsed.m && typeof parsed.m === 'object' &&
+      parsed.i && typeof parsed.i === 'object'
     ) {
-      return new Map(Object.entries(parsed.m));
+      return {
+        names: new Map(Object.entries(parsed.m)),
+        iatas: new Map(Object.entries(parsed.i)),
+      };
     }
   } catch {
     /* ignore */
@@ -131,24 +158,28 @@ function loadAirlineMapFromStorage() {
   return null;
 }
 
-function persistAirlineMap(map) {
+function persistAirlineMap(names, iatas) {
   try {
-    const obj = {};
-    for (const [k, v] of map) obj[k] = v;
-    localStorage.setItem(LS_AIRLINES_KEY, JSON.stringify({ e: Date.now() + AIRLINES_TTL_MS, m: obj }));
+    const m = {};
+    for (const [k, v] of names) m[k] = v;
+    const i = {};
+    for (const [k, v] of iatas) i[k] = v;
+    localStorage.setItem(LS_AIRLINES_KEY, JSON.stringify({ e: Date.now() + AIRLINES_TTL_MS, m, i }));
   } catch {
     /* storage full or unavailable; ignore */
   }
 }
 
-// Resolve the shared code->name map: memory -> localStorage -> network (once).
-// Returns null on failure and clears the in-flight promise so a later lookup
-// retries rather than being stuck with no names for the session.
+// Resolve the shared airline maps: memory -> localStorage -> network (once).
+// Returns the name map (or null) for compatibility with `airlineNameFor`, and
+// populates the IATA map as a side effect. On failure it clears the in-flight
+// promise so a later lookup retries rather than being stuck for the session.
 async function ensureAirlineMap() {
   if (airlineMap) return airlineMap;
   const stored = loadAirlineMapFromStorage();
   if (stored) {
-    airlineMap = stored;
+    airlineMap = stored.names;
+    airlineIataMap = stored.iatas;
     return airlineMap;
   }
   if (!airlineMapPromise) {
@@ -156,10 +187,10 @@ async function ensureAirlineMap() {
       try {
         const res = await fetch(AIRLINES_URL, { headers: { Accept: 'text/csv' } });
         if (!res.ok) return null;
-        const map = parseAirlineCsv(await res.text());
-        if (map.size) {
-          persistAirlineMap(map);
-          return map;
+        const parsed = parseAirlineCsv(await res.text());
+        if (parsed.names.size) {
+          persistAirlineMap(parsed.names, parsed.iatas);
+          return parsed;
         }
         return null;
       } catch {
@@ -167,9 +198,13 @@ async function ensureAirlineMap() {
       }
     })();
   }
-  const map = await airlineMapPromise;
-  if (map) airlineMap = map;
-  else airlineMapPromise = null;
+  const parsed = await airlineMapPromise;
+  if (parsed) {
+    airlineMap = parsed.names;
+    airlineIataMap = parsed.iatas;
+  } else {
+    airlineMapPromise = null;
+  }
   return airlineMap;
 }
 
@@ -180,6 +215,36 @@ async function airlineNameFor(code) {
   if (!c) return null;
   const map = await ensureAirlineMap();
   return (map && map.get(c)) || null;
+}
+
+// ---- Airline logos (Daisycon public image endpoint) -----------------------
+// The passport's Airlines logbook shows each carrier's logo. Daisycon serves
+// airline logos by IATA code from a keyless, CORS-enabled image endpoint, so
+// (like the aircraft photos) there's no API key, server or proxy involved. The
+// logbook stores airlines by display name, so we resolve the name (or a raw
+// ICAO/IATA code) to an IATA code via the same standing-data dataset used for
+// names, then hand back a ready <img> URL. Returns null when the airline can't
+// be mapped to an IATA code (e.g. cargo/military operators without one).
+const AIRLINE_LOGO_BASE = 'https://images.daisycon.io/airline/';
+const AIRLINE_LOGO_W = 120;
+const AIRLINE_LOGO_H = 60;
+
+export async function airlineLogoUrl(nameOrCode) {
+  const raw = (nameOrCode || '').trim();
+  if (!raw) return null;
+  await ensureAirlineMap();
+  if (!airlineIataMap) return null;
+  const iata =
+    airlineIataMap.get(normalizeAirlineName(raw)) ||
+    airlineIataMap.get(raw.toUpperCase()) ||
+    null;
+  if (!iata) return null;
+  const params = new URLSearchParams({
+    width: String(AIRLINE_LOGO_W),
+    height: String(AIRLINE_LOGO_H),
+    iata,
+  });
+  return `${AIRLINE_LOGO_BASE}?${params.toString()}`;
 }
 
 // ---- Structured API errors -----------------------------------------------

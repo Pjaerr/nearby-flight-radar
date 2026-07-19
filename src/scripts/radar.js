@@ -301,7 +301,14 @@ export class Radar {
     this.sweepAngle = 0; // radians, 0 = North, clockwise
     this.prevSweepAngle = 0;
     this.lastFrame = 0;
+    // `running` is the caller's intent (start/stop). The loop only actually
+    // animates when it's also on screen and the tab is visible, so a scope
+    // scrolled out of view or a backgrounded tab stops burning frame budget
+    // (which is what made scrolling janky while lots of contacts were lit).
     this.running = false;
+    this._looping = false; // is a rAF currently scheduled/executing?
+    this._docVisible = document.visibilityState !== 'hidden';
+    this._onScreen = true; // corrected immediately by the IntersectionObserver
     // Shared 0..1 oscillator used to pulse special contacts in unison.
     this.pulse = 0;
 
@@ -309,6 +316,23 @@ export class Radar {
     this._frame = this._frame.bind(this);
     window.addEventListener('resize', this._resize);
     this._resize();
+
+    // Pause when the tab is hidden.
+    this._onVisibility = () => {
+      this._docVisible = document.visibilityState !== 'hidden';
+      this._maybeRun();
+    };
+    document.addEventListener('visibilitychange', this._onVisibility);
+
+    // Pause when the scope is scrolled off screen. Falls back to always-on
+    // when IntersectionObserver isn't available.
+    if (typeof IntersectionObserver === 'function') {
+      this._io = new IntersectionObserver((entries) => {
+        this._onScreen = entries.some((e) => e.isIntersecting);
+        this._maybeRun();
+      });
+      this._io.observe(this.canvas);
+    }
   }
 
   setRange(nm) {
@@ -393,14 +417,27 @@ export class Radar {
   }
 
   start() {
-    if (this.running) return;
     this.running = true;
-    this.lastFrame = performance.now();
-    requestAnimationFrame(this._frame);
+    this._maybeRun();
   }
 
   stop() {
     this.running = false;
+  }
+
+  // The loop should animate only when the caller wants it running AND the
+  // scope is visible (on screen and in a foregrounded tab).
+  _shouldAnimate() {
+    return this.running && this._docVisible && this._onScreen;
+  }
+
+  // Kick the render loop if it should be animating and isn't already. Resets
+  // the frame clock so the first frame after a pause doesn't jump the sweep.
+  _maybeRun() {
+    if (this._looping || !this._shouldAnimate()) return;
+    this._looping = true;
+    this.lastFrame = performance.now();
+    requestAnimationFrame(this._frame);
   }
 
   _resize() {
@@ -423,7 +460,10 @@ export class Radar {
   }
 
   _frame(ts) {
-    if (!this.running) return;
+    if (!this._shouldAnimate()) {
+      this._looping = false;
+      return;
+    }
     const dt = Math.min(0.1, (ts - this.lastFrame) / 1000);
     this.lastFrame = ts;
 
