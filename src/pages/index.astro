@@ -141,19 +141,6 @@
             </dd>
           </div>
         </dl>
-        <!-- Nearest-airport readout: a single subtle line with the same
-             aerodrome icon used on the scope, the airport identity, and its
-             current weather (Open-Meteo, keyless + CORS-enabled). Populated by
-             main.js; hidden until data arrives. -->
-        <p id="wx-line" class="wx" hidden aria-live="polite">
-          <svg class="wx-icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
-            <circle cx="12" cy="12" r="6" fill="none" stroke="currentColor" stroke-width="1.8" />
-            <line x1="6.5" y1="17.5" x2="17.5" y2="6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-          </svg>
-          <span class="wx-caption">NEAREST AIRPORT</span>
-          <span id="wx-code" class="wx-code"></span>
-          <span id="wx-text" class="wx-text"></span>
-        </p>
       </header>
 
       <section class="scope">
@@ -313,6 +300,7 @@
 
         <div id="passport-tabs" class="passport-tabs" role="tablist" aria-label="Passport sections">
           <button type="button" class="passport-tab is-active" data-tab="countries" role="tab" aria-selected="true">Countries</button>
+          <button type="button" class="passport-tab" data-tab="routes" role="tab" aria-selected="false">Routes</button>
           <button type="button" class="passport-tab" data-tab="aircraft" role="tab" aria-selected="false">Aircraft</button>
           <button type="button" class="passport-tab" data-tab="airlines" role="tab" aria-selected="false">Airlines</button>
           <button type="button" class="passport-tab" data-tab="badges" role="tab" aria-selected="false">Badges</button>
@@ -320,27 +308,25 @@
         </div>
 
         <div id="passport-body" class="passport-body">
-          <!-- Countries: world map + clickable detail + day-grouped list. -->
+          <!-- Countries: world map of destinations + country chips. -->
           <section id="tab-countries" class="passport-panel" role="tabpanel">
-            <p class="modal-hint modal-hint-sticky">Countries glow brighter the more flights cross your radar. Chips show origin &rarr; destination pairings &mdash; click one (or a country on the map) to pin its flights.</p>
+            <p class="modal-hint modal-hint-sticky">Countries glow brighter the more flights you've seen heading there. Click a chip to see its inbound flights.</p>
             <div class="passport-crt">
               <div id="passport-map" class="map passport-map"></div>
             </div>
             <div id="passport-list" class="passport-list"></div>
-            <div id="passport-country-detail" class="country-detail">
-              <p class="passport-hint">Select a route pairing above, or a country on the map, to see its flights.</p>
-            </div>
+            <div id="passport-country-detail" class="country-detail"></div>
           </section>
 
-          <!-- Aircraft spotting logbook: one table, grouped by type or by
-               individual registration (tail). -->
+          <!-- Routes: origin → destination pairings. -->
+          <section id="tab-routes" class="passport-panel" role="tabpanel" hidden>
+            <p class="modal-hint modal-hint-sticky">Origin &rarr; destination pairings from flights that crossed your radar. Click a route to see its flights.</p>
+            <div id="routes-list" class="passport-list"></div>
+            <div id="routes-detail" class="country-detail"></div>
+          </section>
+
+          <!-- Aircraft spotting logbook, grouped by type. -->
           <section id="tab-aircraft" class="passport-panel" role="tabpanel" hidden>
-            <div class="log-toolbar">
-              <div id="aircraft-groupby" class="seg" role="group" aria-label="Group aircraft by">
-                <button type="button" class="seg-btn is-active" data-group="type" aria-pressed="true">By type</button>
-                <button type="button" class="seg-btn" data-group="reg" aria-pressed="false">By registration</button>
-              </div>
-            </div>
             <table class="log-table">
               <thead id="aircraft-head"></thead>
               <tbody id="aircraft-body"></tbody>
@@ -458,6 +444,7 @@
         margin: 0;
       }
       .readout > div {
+        min-width: 0;
         border: 1px solid rgba(0, 255, 120, 0.25);
         border-radius: 6px;
         padding: 6px 10px;
@@ -477,49 +464,6 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-      }
-      /* Nearest-airport readout: one subtle line under the HUD boxes (no
-         container), with the scope's aerodrome icon, the airport, and its
-         weather. Truncates with an ellipsis rather than growing on small
-         screens. */
-      .wx {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        margin: 8px 2px 0;
-        font-size: 11px;
-        letter-spacing: 0.04em;
-        color: #9fe0bd;
-        white-space: nowrap;
-        overflow: hidden;
-      }
-      .wx[hidden] { display: none; }
-      .wx-icon {
-        flex: none;
-        color: var(--green);
-        opacity: 0.85;
-      }
-      .wx-caption {
-        flex: none;
-        font-size: 9px;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
-        opacity: 0.5;
-      }
-      .wx-code {
-        flex: none;
-        font-weight: 700;
-        color: #baffd7;
-        letter-spacing: 0.04em;
-        text-shadow: 0 0 8px rgba(0, 255, 120, 0.4);
-      }
-      /* The long part shrinks and ellipsizes so the row never overflows. */
-      .wx-text {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        opacity: 0.8;
       }
       .scope {
         flex: 1;
@@ -823,8 +767,16 @@
         display: flex;
         align-items: center;
         gap: 8px;
+        min-width: 0;
+      }
+      .range-cell > span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .range-edit {
+        flex: none;
         font: inherit;
         font-size: 10px;
         letter-spacing: 0.1em;
@@ -1025,9 +977,10 @@
         overscroll-behavior: contain;
       }
       .passport-panel[hidden] { display: none; }
-      /* Countries tab: pin the map (and selected-route detail) and let only the
-         day-grouped entries list scroll. */
-      #tab-countries:not([hidden]) {
+      /* Countries / Routes tabs: pin the map (Countries) and detail panels,
+         and let only the entries list scroll. */
+      #tab-countries:not([hidden]),
+      #tab-routes:not([hidden]) {
         display: flex;
         flex-direction: column;
         overflow: hidden;
@@ -1055,7 +1008,7 @@
         border-bottom: 1px solid rgba(0, 255, 120, 0.2);
       }
       .passport-map {
-        height: 360px;
+        height: clamp(200px, 32vh, 300px);
         /* Ocean is black; the seamless land layer paints continents black with
            a green coastline, so the map reads as green outlines on a dark tube
            with visited countries filled green. */
@@ -1172,6 +1125,87 @@
         color: #d9ffec;
       }
 
+      /* Passport on phones (iPhone SE and similar): reclaim vertical space so
+         the map, chip list, and detail panel can coexist without clipping. */
+      @media (max-width: 600px) {
+        #passport-modal.modal {
+          padding: 0;
+          align-items: stretch;
+        }
+        .passport-card {
+          max-width: none;
+          width: 100%;
+          height: 100%;
+          height: 100dvh;
+          border-radius: 0;
+          border-left: none;
+          border-right: none;
+        }
+        .passport-card .modal-head {
+          align-items: flex-start;
+          gap: 8px;
+          padding: 10px 12px;
+          flex-wrap: wrap;
+        }
+        .passport-card .modal-title {
+          flex: 1 1 auto;
+          min-width: 0;
+        }
+        .passport-card .modal-head-actions {
+          flex: none;
+          margin-left: auto;
+          gap: 6px;
+        }
+        .passport-reset {
+          font-size: 9px;
+          letter-spacing: 0.08em;
+          padding: 3px 7px;
+        }
+        .passport-tabs {
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 0;
+          padding: 0;
+        }
+        .passport-tab {
+          font-size: 10px;
+          letter-spacing: 0.06em;
+          padding: 8px 4px;
+          text-align: center;
+          border-radius: 0;
+          border: none;
+          border-bottom: 2px solid transparent;
+        }
+        .passport-tab.is-active {
+          border-color: transparent;
+          border-bottom-color: var(--green);
+          background: rgba(0, 255, 120, 0.1);
+        }
+        .modal-hint-sticky {
+          padding: 8px 12px;
+          font-size: 10px;
+          line-height: 1.35;
+        }
+        .passport-map {
+          height: min(160px, 24vh);
+        }
+        .passport-list {
+          min-height: 64px;
+          padding: 6px 12px 8px;
+        }
+        .country-detail:not(:empty) {
+          padding: 8px 12px 12px;
+        }
+        #tab-countries:has(.country-flight-list) .passport-map,
+        #tab-routes:has(.country-flight-list) .passport-map {
+          height: min(120px, 18vh);
+        }
+        #tab-countries:has(.country-flight-list) .country-detail,
+        #tab-routes:has(.country-flight-list) .country-detail {
+          min-height: 200px;
+        }
+      }
+
       /* Share-card preview modal: a portrait canvas rendered to an <img>. */
       .share-card { max-width: 460px; }
       .share-body {
@@ -1210,7 +1244,7 @@
       .share-hint { text-align: center; }
       .passport-list {
         flex: 1 1 auto;
-        min-height: 140px;
+        min-height: 100px;
         overflow-y: auto;
         overscroll-behavior: contain;
         display: flex;
@@ -1218,22 +1252,14 @@
         gap: 10px;
         padding: 6px 14px 10px;
       }
-      .passport-day {
-        display: flex;
-        flex-direction: column;
-        gap: 5px;
-      }
-      .passport-day-head {
-        font-size: 10px;
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
-        color: var(--green);
-        opacity: 0.75;
-        text-shadow: 0 0 6px rgba(0, 255, 120, 0.35);
-      }
-      .passport-day-chips {
+      .passport-chips {
         display: flex;
         flex-wrap: wrap;
+        gap: 6px;
+      }
+      .passport-routes {
+        display: flex;
+        flex-direction: column;
         gap: 6px;
       }
       .passport-map :global(.leaflet-tooltip) .tip-flight {
@@ -1268,20 +1294,75 @@
         border-color: #baffd7;
         color: #eafff2;
       }
+      /* Routes tab: full-width cards instead of compact chips. */
+      .passport-route-card {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        width: 100%;
+        box-sizing: border-box;
+        font: inherit;
+        font-size: 13px;
+        text-align: left;
+        color: #d3ffe6;
+        background: rgba(0, 40, 18, 0.28);
+        border: 1px solid rgba(0, 255, 120, 0.2);
+        border-radius: 6px;
+        padding: 10px 12px;
+        cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+      .passport-route-card:hover {
+        background: rgba(0, 255, 120, 0.14);
+        border-color: rgba(0, 255, 120, 0.4);
+      }
+      .passport-route-card.is-selected {
+        background: rgba(0, 255, 120, 0.22);
+        border-color: #baffd7;
+        color: #eafff2;
+      }
+      .passport-route-ends {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 6px;
+        min-width: 0;
+        font-weight: 700;
+      }
+      .passport-route-arrow {
+        color: var(--green);
+        opacity: 0.7;
+        font-weight: 700;
+      }
+      .passport-route-count {
+        flex: none;
+        font-size: 11px;
+        font-weight: 400;
+        letter-spacing: 0.06em;
+        opacity: 0.7;
+        white-space: nowrap;
+      }
       .passport-empty {
         margin: 0;
         font-size: 12px;
         opacity: 0.55;
       }
 
-      /* ---- Country detail panel (Countries tab) --------------------------- */
-      /* Pinned below the scrolling entries list. Capped + independently
-         scrollable so a route with many flights can't crowd out the list. */
+      /* ---- Detail panel (Countries / Routes tabs) ------------------------- */
+      /* Pinned below the scrolling entries list. The head stays put; the flight
+         list fills remaining space and scrolls on its own. */
       .country-detail {
         flex: none;
-        max-height: 42%;
-        overflow-y: auto;
+        max-height: 48%;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
         overscroll-behavior: contain;
+        padding: 0;
+      }
+      .country-detail:not(:empty) {
         border-top: 1px solid rgba(0, 255, 120, 0.2);
         padding: 8px 14px 14px;
       }
@@ -1291,6 +1372,7 @@
         opacity: 0.55;
       }
       .country-detail-head {
+        flex: none;
         display: flex;
         align-items: baseline;
         justify-content: space-between;
@@ -1327,14 +1409,37 @@
         list-style: none;
         margin: 0;
         padding: 0;
+        flex: 1 1 auto;
+        min-height: 0;
         display: flex;
         flex-direction: column;
         gap: 8px;
-        max-height: 220px;
         overflow-y: auto;
         /* Scroll the flight list on its own; don't chain out to the modal body
            once the top/bottom is reached. */
         overscroll-behavior: contain;
+      }
+
+      /* When a country/route is pinned, reclaim map + hint space so the flight
+         list has room to breathe. */
+      #tab-countries:has(.country-flight-list) .modal-hint-sticky,
+      #tab-routes:has(.country-flight-list) .modal-hint-sticky {
+        display: none;
+      }
+      #tab-countries:has(.country-flight-list) .passport-map {
+        height: clamp(140px, 22vh, 220px);
+      }
+      #tab-countries:has(.country-flight-list) .passport-list,
+      #tab-routes:has(.country-flight-list) .passport-list {
+        flex: 0 1 auto;
+        max-height: 30%;
+        min-height: 56px;
+      }
+      #tab-countries:has(.country-flight-list) .country-detail,
+      #tab-routes:has(.country-flight-list) .country-detail {
+        flex: 1 1 50%;
+        max-height: none;
+        min-height: 220px;
       }
       .cflight {
         padding: 7px 10px;
@@ -1370,48 +1475,6 @@
       }
 
       /* ---- Logbook tables (Aircraft / Airlines) --------------------------- */
-      /* Toolbar above a logbook table holding the grouping toggle. Sticky so it
-         stays put while the (potentially long) table scrolls beneath it. */
-      .log-toolbar {
-        position: sticky;
-        top: 0;
-        z-index: 2;
-        display: flex;
-        gap: 8px;
-        padding: 10px 14px;
-        background: #041a0d;
-        border-bottom: 1px solid rgba(0, 255, 120, 0.15);
-      }
-      .seg {
-        display: inline-flex;
-        border: 1px solid rgba(0, 255, 120, 0.35);
-        border-radius: 6px;
-        overflow: hidden;
-      }
-      .seg-btn {
-        font: inherit;
-        font-size: 11px;
-        letter-spacing: 0.06em;
-        color: var(--green);
-        background: transparent;
-        border: none;
-        padding: 5px 12px;
-        cursor: pointer;
-        opacity: 0.7;
-        transition: background 0.15s ease, opacity 0.15s ease;
-      }
-      .seg-btn + .seg-btn { border-left: 1px solid rgba(0, 255, 120, 0.35); }
-      .seg-btn:hover { opacity: 1; background: rgba(0, 255, 120, 0.08); }
-      .seg-btn.is-active {
-        opacity: 1;
-        color: #02160b;
-        background: var(--green);
-        font-weight: 700;
-      }
-      /* The grouping toolbar is sticky at the top; offset the sticky header row
-         so it parks just beneath it instead of hiding behind it. */
-      #tab-aircraft .log-table thead th { top: 43px; }
-
       .log-table {
         width: 100%;
         border-collapse: collapse;

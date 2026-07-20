@@ -1,6 +1,8 @@
 // Opt-in radar sound, synthesized entirely with the Web Audio API so there are
 // no asset files to ship. Three sounds:
-//   - ping()     a short sonar blip fired as the sweep crosses a contact
+//   - ping()     a short sonar blip fired as the sweep crosses a contact.
+//                Pass { first: true } for a louder hit when an aircraft first
+//                enters the scope; re-pings use the same tone, quieter.
 //   - overhead() the same blip in a rapid burst — the "look up NOW" alert for a
 //                contact passing almost directly overhead
 //   - chime()    a soft two-note bell used to confirm sound has been enabled
@@ -50,21 +52,26 @@ export class RadarAudio {
     if (!muted) this._ensure();
   }
 
-  // A crisp air-traffic-scope "blip": a bright, tight tone with a snappy attack
-  // and a short decay, plus just a whisper of echo for a sense of space (not
-  // the deep, cavernous sonar ring). Cheap enough to fire on every sweep-cross.
+  // A mid-range air-traffic-scope "blip": a tight tone with a soft attack and
+  // a short decay, plus just a whisper of echo for a sense of space (not the
+  // deep, cavernous sonar ring). Cheap enough to fire on every sweep-cross.
   //
   // `bearingDeg` (compass bearing of the contact, 0 = North, 90 = East) places
   // the blip in the stereo field so a plane at 3 o'clock sounds off to the
   // right. Omitted / non-finite bearings play dead centre.
-  ping(bearingDeg) {
+  //
+  // Pass `{ first: true }` when the sweep first illuminates a new contact: same
+  // pitch, just louder so arrivals stand out from quieter refresh pings.
+  ping(bearingDeg, { first = false } = {}) {
     if (this.muted) return;
     const ctx = this._ensure();
     if (!ctx) return;
     const now = performance.now();
-    if (now - this._lastPingAt < this._minPingGapMs) return;
+    // First-entry hits always play — a new contact shouldn't be swallowed by
+    // the dense-scope throttle that keeps refresh pings from rattling.
+    if (!first && now - this._lastPingAt < this._minPingGapMs) return;
     this._lastPingAt = now;
-    this._blip(ctx.currentTime, this._panFor(bearingDeg));
+    this._blip(ctx.currentTime, this._panFor(bearingDeg), { strong: first });
   }
 
   // Map a compass bearing to a stereo pan position in [-1, +1]. East (90 deg)
@@ -97,7 +104,9 @@ export class RadarAudio {
   // Build one blip tone starting at AudioContext time `t`. Shared by the single
   // sweep-cross ping and the rapid overhead burst. `pan` places the whole blip
   // (dry + echo) in the stereo field, -1 (hard left) .. +1 (hard right).
-  _blip(t, pan = 0) {
+  // `{ strong: true }` is the first-entry hit: same tone, just louder than the
+  // quieter refresh ping.
+  _blip(t, pan = 0, { strong = false } = {}) {
     const ctx = this.ctx;
     if (!ctx) return;
 
@@ -107,12 +116,21 @@ export class RadarAudio {
     const panner = this._makePanner(pan);
     const out = panner || this.master;
 
-    // Bandpass keeps the tone tight and "electronic". Its centre frequency
-    // tracks the oscillator's doppler glide so the resonance follows the pitch.
+    // Mid-range centre — warm enough to avoid a piercing whistle, still clearly
+    // "scope electronic". Same pitch for first-entry and refresh; only loudness
+    // differs.
+    const f0 = 680;
+    const f1 = 650;
+    const peak = strong ? 0.36 : 0.18;
+    // First-entry hangs on just a touch longer so it feels acquired, not a
+    // different sound — keep the delta tiny.
+    const dur = strong ? 0.82 : 0.72;
+
+    // Bandpass keeps the tone tight and "electronic".
     const bp = ctx.createBiquadFilter();
     bp.type = 'bandpass';
-    bp.frequency.value = 1240;
-    bp.Q.value = 6;
+    bp.frequency.value = f0;
+    bp.Q.value = 5.5;
 
     // A single, extremely short echo tap — so tight (~18 ms) it fuses into the
     // dry blip as one sound rather than a perceptible double ping. Just adds a
@@ -121,23 +139,22 @@ export class RadarAudio {
     const delay = ctx.createDelay(0.1);
     delay.delayTime.value = 0.018;
     const echoGain = ctx.createGain();
-    echoGain.gain.value = 0.14;
+    echoGain.gain.value = strong ? 0.18 : 0.12;
     delay.connect(echoGain).connect(out);
 
-    // The dry blip. A gentle doppler arc — pitch eases up as the sweep reaches
-    // the contact, then glides down as it passes — plus a soft swell-in attack
-    // makes it "drag" past rather than snap.
+    // The dry blip. A gentle doppler arc — pitch eases down as the beam passes
+    // — plus a soft swell-in attack so it "drags" past rather than snaps.
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(1260, t);
+    osc.frequency.setValueAtTime(f0, t);
     // Just a whisper of downward drift — enough to feel movement, not a glide.
-    osc.frequency.linearRampToValueAtTime(1230, t + 0.7);
+    osc.frequency.linearRampToValueAtTime(f1, t + dur);
     gain.gain.setValueAtTime(0.0001, t);
     // Softer, swelling attack so the tone slurs in as the beam arrives.
-    gain.gain.exponentialRampToValueAtTime(0.28, t + 0.045);
+    gain.gain.exponentialRampToValueAtTime(peak, t + 0.045);
     // Long, smooth exponential tail so the tone rings out and drags away.
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.72);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
 
     osc.connect(bp).connect(gain);
     // Dry signal to the (panned) output, plus a single tap into the echo.
@@ -147,7 +164,7 @@ export class RadarAudio {
     if (panner) panner.connect(this.master);
 
     osc.start(t);
-    osc.stop(t + 0.77);
+    osc.stop(t + dur + 0.05);
   }
 
   // Create a StereoPannerNode set to `pan` (-1..+1). Returns null when the

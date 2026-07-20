@@ -7,10 +7,9 @@ import {
   fetchAircraftPhoto,
   cachedAircraftPhoto,
   airlineLogoUrl,
-  fetchWeather,
   RARE_TYPES,
 } from './api.js';
-import { airportsWithin, nearestAirport, airportCode } from './airports.js';
+import { airportsWithin, airportCode } from './airports.js';
 import { RadarAudio } from './audio.js';
 
 const SLIDER_MAX = 50; // nm; airplanes.live caps a /point query at 250 nm
@@ -78,6 +77,8 @@ const els = {
   shareNative: document.getElementById('passport-share-native'),
   passportBody: document.getElementById('passport-body'),
   passportCountryDetail: document.getElementById('passport-country-detail'),
+  routesList: document.getElementById('routes-list'),
+  routesDetail: document.getElementById('routes-detail'),
   // Aircraft-photo lightbox (Planespotters).
   photoLightbox: document.getElementById('photo-lightbox'),
   photoLightboxImg: document.getElementById('photo-lightbox-img'),
@@ -86,22 +87,18 @@ const els = {
   photoLightboxClose: document.getElementById('photo-lightbox-close'),
   // Tab panels + their content mounts.
   tabCountries: document.getElementById('tab-countries'),
+  tabRoutes: document.getElementById('tab-routes'),
   tabAircraft: document.getElementById('tab-aircraft'),
   tabAirlines: document.getElementById('tab-airlines'),
   tabBadges: document.getElementById('tab-badges'),
   tabStats: document.getElementById('tab-stats'),
   aircraftHead: document.getElementById('aircraft-head'),
   aircraftBody: document.getElementById('aircraft-body'),
-  aircraftGroupBy: document.getElementById('aircraft-groupby'),
   airlinesBody: document.getElementById('airlines-body'),
   badgesGrid: document.getElementById('badges-grid'),
   statsBody: document.getElementById('stats-body'),
   // Live "badge earned" toast host, overlaid at the top of the scope.
   badgeToasts: document.getElementById('badge-toasts'),
-  // Nearest-airport readout in the HUD.
-  wxLine: document.getElementById('wx-line'),
-  wxCode: document.getElementById('wx-code'),
-  wxText: document.getElementById('wx-text'),
   // Screen-reader regions: a polite live log and a mirrored aircraft list.
   srLive: document.getElementById('sr-live'),
   srList: document.getElementById('sr-aircraft-list'),
@@ -397,8 +394,13 @@ const radar = new Radar(els.canvas, {
     queueSighting(b);
   },
   // Radar ping as the sweep crosses a contact (no-op while muted). Pass the
-  // contact's bearing so the blip pans to where it sits on the scope.
-  onPing: (b) => audio.ping(b?.displayBearingDeg ?? b?.bearingDeg),
+  // contact's bearing so the blip pans to where it sits on the scope. The
+  // first illumination of a new contact gets the stronger "acquired" hit
+  // (`announced` is still false here — radar sets it right after onPing).
+  onPing: (b) =>
+    audio.ping(b?.displayBearingDeg ?? b?.bearingDeg, {
+      first: b != null && !b.announced,
+    }),
   // Toggle the focus-mode banner as the user locks onto / releases a contact
   // (also fires when a focused contact leaves range and focus auto-clears).
   onFocusChange: (b) => updateFocusUI(b),
@@ -478,11 +480,11 @@ const MAX_FLIGHTS_PER_COUNTRY = 50;
 const ARCTIC_LAT = 66.5622;
 
 // Minimum qualifying sightings before the time-of-day / domestic "discovery"
-// badges unlock. Kept low so they're still easy, but enough that a single
-// common contact on open no longer instantly fires a toast.
-const NIGHT_OWL_NEED = 3;
-const EARLY_BIRD_NEED = 3;
-const HOMEBOUND_NEED = 5;
+// badges unlock. High enough that casual open-and-watch sessions don't
+// immediately fire toasts.
+const NIGHT_OWL_NEED = 10;
+const EARLY_BIRD_NEED = 10;
+const HOMEBOUND_NEED = 20;
 
 // Great-circle distance between two lat/lon points, in nautical miles. Used to
 // measure how far an origin airport is and the length of a route.
@@ -502,11 +504,6 @@ const COMPASS_16 = [
   'N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
   'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW',
 ];
-function compassDir(deg) {
-  if (typeof deg !== 'number' || Number.isNaN(deg)) return '';
-  const i = Math.round(deg / 22.5);
-  return COMPASS_16[((i % 16) + 16) % 16];
-}
 
 const isRareType = (ty) => RARE_TYPES.has((ty || '').toUpperCase());
 
@@ -1387,8 +1384,8 @@ function applyCenter(c) {
   updateAircraftList();
   setStatus('Scanning new area\u2026', 'info');
   restartPolling();
-  // New center: refresh the airport overlay and nearest-airport weather.
-  refreshLocationData();
+  // New center: refresh the airport overlay.
+  refreshAirportOverlay();
 }
 
 function wireCenterPicker() {
@@ -1508,14 +1505,13 @@ function fillOpacityForCount(c) {
   return min + (max - min) * t;
 }
 
-// Country layer sits on top of the land base and only paints visited countries
-// green, brighter the more flights have covered them. Unvisited countries stay
-// invisible (but still hoverable for tooltips) so the simplified, non-shared
-// country borders never show as slivers.
+// Country layer sits on top of the land base and only paints destination
+// countries green, brighter the more inbound flights have covered them.
+// Unvisited countries stay invisible (but still hoverable for tooltips) so the
+// simplified, non-shared country borders never show as slivers.
 function styleForFeature(feature) {
   const iso = featureIso2(feature.properties);
-  const entry = iso ? passport.countries[iso] : null;
-  const c = entry ? entry.c : 0;
+  const c = iso ? destinationFlightCount(iso) : 0;
   const isSel =
     iso &&
     (iso === selectedIso ||
@@ -1595,29 +1591,61 @@ function pairKeyOf(fromIso, toIso) {
   return `${fromIso || '??'}\u0000${toIso || '??'}`;
 }
 
-// Group deduped sightings by day, then by directed country pairing
-// (origin -> destination). Each flight is stored twice (once under its origin
-// country, once under its destination), so we dedupe on a per-flight signature
-// before counting. Returns days newest first, each with its pairings sorted
-// busiest first. Showing pairings rather than every endpoint keeps the day list
-// compact and highlights where flights actually run.
-function buildPassportPairingDays() {
+// Flights recorded against a country where that country is the destination.
+// Prefers the explicit `role: 'd'` stamp; falls back to matching `toIso` for
+// older records written before roles existed.
+function destinationFlightsOf(iso) {
+  const code = (iso || '').toUpperCase();
+  const entry = code ? passport.countries[code] : null;
+  if (!entry) return [];
+  const flights = Array.isArray(entry.flights) ? entry.flights : [];
+  return flights
+    .filter((fl) => {
+      if (fl.role === 'd') return true;
+      if (fl.role === 'o') return false;
+      return (fl.toIso || '').toUpperCase() === code;
+    })
+    .sort((a, b) => (a.t || 0) - (b.t || 0));
+}
+
+function destinationFlightCount(iso) {
+  return destinationFlightsOf(iso).length;
+}
+
+// Collate destination-country sightings across all time. Each flight is stored
+// under both endpoints, so we only keep destination-side copies (and dedupe)
+// before counting. Returns countries sorted busiest first.
+function buildPassportDestinations() {
   const seen = new Set();
-  const map = new Map(); // dayKey -> Map(pairKey -> pairing)
-  const ensure = (dayK, fromIso, toIso) => {
-    let day = map.get(dayK);
-    if (!day) {
-      day = new Map();
-      map.set(dayK, day);
+  const map = new Map(); // iso -> { iso, count, flights }
+
+  for (const [code, entry] of Object.entries(passport.countries)) {
+    for (const fl of destinationFlightsOf(code)) {
+      const iso = (fl.toIso || code || '').toUpperCase();
+      if (!iso) continue;
+      const sig = `${fl.t}|${fl.cs}|${fl.reg}|${fl.ty}`;
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      let c = map.get(iso);
+      if (!c) {
+        c = { iso, count: 0, flights: [] };
+        map.set(iso, c);
+      }
+      c.count += 1;
+      c.flights.push(fl);
     }
-    const pairK = pairKeyOf(fromIso, toIso);
-    let p = day.get(pairK);
-    if (!p) {
-      p = { key: pairK, fromIso, toIso, count: 0, flights: [] };
-      day.set(pairK, p);
-    }
-    return p;
-  };
+  }
+
+  return [...map.values()].sort((a, b) => b.count - a.count || a.iso.localeCompare(b.iso));
+}
+
+// Collate directed country pairings (origin -> destination) across all time.
+// Each flight is stored twice (once under its origin country, once under its
+// destination), so we dedupe on a per-flight signature before counting.
+// Returns pairings sorted busiest first.
+function buildPassportPairings() {
+  const seen = new Set();
+  const map = new Map(); // pairKey -> pairing
 
   for (const entry of Object.values(passport.countries)) {
     const flights = Array.isArray(entry.flights) ? entry.flights : [];
@@ -1627,23 +1655,22 @@ function buildPassportPairingDays() {
       seen.add(sig);
       const fromIso = (fl.fromIso || '').toUpperCase();
       const toIso = (fl.toIso || '').toUpperCase();
-      const p = ensure(dayKeyOf(fl.t || entry.last || Date.now()), fromIso, toIso);
+      const pairK = pairKeyOf(fromIso, toIso);
+      let p = map.get(pairK);
+      if (!p) {
+        p = { key: pairK, fromIso, toIso, count: 0, flights: [] };
+        map.set(pairK, p);
+      }
       p.count += 1;
       p.flights.push(fl);
     }
   }
 
-  return [...map.entries()]
-    .map(([key, pairMap]) => ({
-      key,
-      label: dayLabelOf(key),
-      pairs: [...pairMap.values()].sort((a, b) => b.count - a.count || a.key.localeCompare(b.key)),
-    }))
-    .sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
+  return [...map.values()].sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
 }
 
-// All deduped flights that ran a given directed pairing, across every day, so
-// the detail panel can show the full history of that origin -> destination.
+// All deduped flights that ran a given directed pairing, so the detail panel
+// can show the full history of that origin -> destination.
 function pairingFlights(fromIso, toIso) {
   const wantKey = pairKeyOf(fromIso, toIso);
   const seen = new Set();
@@ -1709,93 +1736,108 @@ function rarityTagCell(rare, mil) {
   return td;
 }
 
-// Currently-selected country (ISO) in the Countries tab, and which tab is live.
-// The day list shows origin -> destination pairings; a clicked chip pins a
-// pairing (selectedPair), while a map click pins a single country (selectedIso).
-// The two are mutually exclusive since they share one detail panel.
+// Currently-selected country (ISO) in the Countries tab, pairing in the Routes
+// tab, and which tab is live. The two selections are mutually exclusive since
+// the map highlight is shared.
 let selectedIso = null;
 let selectedPair = null;
 let activePassportTab = 'countries';
 
-// Render whichever detail is pinned: a route pairing (chip) or a single
-// country (map click). Falls back to the empty prompt when nothing is selected.
-function renderActiveDetail() {
-  if (selectedPair) renderPairingDetail(selectedPair);
-  else renderCountryDetail(selectedIso);
-}
-
-// Refresh the day-grouped list of origin -> destination pairings (Countries
-// tab). Showing pairings instead of every from/to country keeps the list short
-// and surfaces the routes that actually cross the radar.
+// Refresh the collated list of destination countries (Countries tab).
 function renderPassportStats() {
-  const codes = Object.keys(passport.countries);
-
   els.passportList.innerHTML = '';
-  if (!codes.length) {
+  const countries = buildPassportDestinations();
+  if (!countries.length) {
     const empty = document.createElement('p');
     empty.className = 'passport-empty';
-    empty.textContent = 'No countries yet. Leave the radar running to collect them.';
+    empty.textContent = 'No destinations yet. Leave the radar running to collect countries flights are heading to.';
     els.passportList.appendChild(empty);
-    renderActiveDetail();
+    renderCountryDetail(selectedIso);
     return;
   }
 
-  const days = buildPassportPairingDays();
-  if (!days.length) {
+  const chips = document.createElement('div');
+  chips.className = 'passport-chips';
+  for (const c of countries) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'passport-chip';
+    chip.dataset.iso = c.iso;
+    if (selectedIso && c.iso === selectedIso) chip.classList.add('is-selected');
+    const flag = flagEmoji(c.iso);
+    const name = countryNameOf(c.iso) || c.iso;
+    chip.textContent = `${flag ? `${flag} ` : ''}${name} \u00b7 ${c.count}`;
+    chip.title = flightsTitle(name, c.flights, c.count);
+    chips.appendChild(chip);
+  }
+  els.passportList.appendChild(chips);
+  renderCountryDetail(selectedIso);
+}
+
+// Refresh the collated list of origin -> destination pairings (Routes tab).
+function renderPassportRoutes() {
+  const list = els.routesList;
+  if (!list) return;
+  list.innerHTML = '';
+
+  const pairs = buildPassportPairings();
+  if (!pairs.length) {
     const empty = document.createElement('p');
     empty.className = 'passport-empty';
     empty.textContent = 'No routes yet. Leave the radar running to collect origin \u2192 destination pairings.';
-    els.passportList.appendChild(empty);
-    renderActiveDetail();
+    list.appendChild(empty);
+    renderPairingDetail(selectedPair);
     return;
   }
 
-  for (const day of days) {
-    const section = document.createElement('div');
-    section.className = 'passport-day';
+  const cards = document.createElement('div');
+  cards.className = 'passport-routes';
+  for (const p of pairs) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'passport-route-card';
+    card.dataset.pair = p.key;
+    card.dataset.fromIso = p.fromIso;
+    card.dataset.toIso = p.toIso;
+    if (selectedPair && p.key === selectedPair.key) card.classList.add('is-selected');
+    card.title = flightsTitle(pairRouteName(p.fromIso, p.toIso), p.flights, p.count);
 
-    const head = document.createElement('div');
-    head.className = 'passport-day-head';
-    const n = day.pairs.length;
-    head.textContent = `${day.label} \u00b7 ${n} route${n === 1 ? '' : 's'}`;
-    section.appendChild(head);
+    const ends = document.createElement('span');
+    ends.className = 'passport-route-ends';
+    const from = document.createElement('span');
+    from.textContent = pairEndpointText(p.fromIso);
+    const arrow = document.createElement('span');
+    arrow.className = 'passport-route-arrow';
+    arrow.textContent = '\u2192';
+    const to = document.createElement('span');
+    to.textContent = pairEndpointText(p.toIso);
+    ends.appendChild(from);
+    ends.appendChild(arrow);
+    ends.appendChild(to);
 
-    const chips = document.createElement('div');
-    chips.className = 'passport-day-chips';
-    for (const p of day.pairs) {
-      const chip = document.createElement('button');
-      chip.type = 'button';
-      chip.className = 'passport-chip';
-      chip.dataset.pair = p.key;
-      chip.dataset.fromIso = p.fromIso;
-      chip.dataset.toIso = p.toIso;
-      if (selectedPair && p.key === selectedPair.key) chip.classList.add('is-selected');
-      chip.textContent = `${pairEndpointText(p.fromIso)} \u2192 ${pairEndpointText(p.toIso)} \u00b7 ${p.count}`;
-      chip.title = flightsTitle(pairRouteName(p.fromIso, p.toIso), p.flights, p.count);
-      chips.appendChild(chip);
-    }
-    section.appendChild(chips);
-    els.passportList.appendChild(section);
+    const count = document.createElement('span');
+    count.className = 'passport-route-count';
+    count.textContent = `${p.count} flight${p.count === 1 ? '' : 's'}`;
+
+    card.appendChild(ends);
+    card.appendChild(count);
+    cards.appendChild(card);
   }
-  renderActiveDetail();
+  list.appendChild(cards);
+  renderPairingDetail(selectedPair);
 }
 
-// Render the detail panel for the selected country (its recent flights), or a
-// prompt when nothing is selected. Replaces the need to hover the map.
+// Render the detail panel for the selected destination country (its inbound
+// flights). Empty when nothing is selected — the sticky tab hint covers that.
 function renderCountryDetail(iso) {
   const el = els.passportCountryDetail;
   if (!el) return;
   el.innerHTML = '';
-  const entry = iso ? passport.countries[iso] : null;
-  if (!entry) {
-    const p = document.createElement('p');
-    p.className = 'passport-hint';
-    p.textContent = 'Select a route pairing below, or a country on the map, to see its flights.';
-    el.appendChild(p);
-    return;
-  }
+  const flights = iso ? destinationFlightsOf(iso) : [];
+  if (!iso || !flights.length) return;
 
-  const name = entry.n || iso;
+  const entry = passport.countries[iso];
+  const name = (entry && entry.n) || iso;
   const head = document.createElement('div');
   head.className = 'country-detail-head';
   const title = document.createElement('span');
@@ -1804,7 +1846,7 @@ function renderCountryDetail(iso) {
   title.textContent = `${flag ? `${flag} ` : ''}${name}`;
   const meta = document.createElement('span');
   meta.className = 'country-detail-meta';
-  meta.textContent = `${entry.c} flight${entry.c === 1 ? '' : 's'} \u00b7 first ${seenLabel(entry.first)}`;
+  meta.textContent = `${flights.length} flight${flights.length === 1 ? '' : 's'}`;
   const clear = document.createElement('button');
   clear.type = 'button';
   clear.className = 'country-detail-clear';
@@ -1817,17 +1859,9 @@ function renderCountryDetail(iso) {
   head.appendChild(clear);
   el.appendChild(head);
 
-  const flights = Array.isArray(entry.flights) ? entry.flights.slice().reverse() : [];
-  if (!flights.length) {
-    const p = document.createElement('p');
-    p.className = 'passport-hint';
-    p.textContent = 'No per-flight detail recorded for this country.';
-    el.appendChild(p);
-    return;
-  }
   const list = document.createElement('ul');
   list.className = 'country-flight-list';
-  for (const fl of flights.slice(0, 12)) {
+  for (const fl of flights.slice().reverse().slice(0, 12)) {
     list.appendChild(renderCountryFlight(fl, iso));
   }
   el.appendChild(list);
@@ -1837,18 +1871,19 @@ function renderCountryDetail(iso) {
 // every day, newest first. Mirrors renderCountryDetail but keyed on the whole
 // origin -> destination pair rather than a single country.
 function renderPairingDetail(pair) {
-  const el = els.passportCountryDetail;
+  const el = els.routesDetail;
   if (!el) return;
   el.innerHTML = '';
 
+  if (!pair) return;
+
   const flights = pairingFlights(pair.fromIso, pair.toIso);
-  // No route title here: the highlighted chip already names the pairing.
+  // No route title here: the highlighted card already names the pairing.
   const head = document.createElement('div');
   head.className = 'country-detail-head';
   const meta = document.createElement('span');
   meta.className = 'country-detail-meta';
-  const first = flights.length ? seenLabel(flights[0].t) : '';
-  meta.textContent = `${flights.length} flight${flights.length === 1 ? '' : 's'}${first ? ` \u00b7 first ${first}` : ''}`;
+  meta.textContent = `${flights.length} flight${flights.length === 1 ? '' : 's'}`;
   const clear = document.createElement('button');
   clear.type = 'button';
   clear.className = 'country-detail-clear';
@@ -1966,31 +2001,47 @@ function findLayerForIso(iso) {
   return found;
 }
 
-// Deselect the pinned country: clear the detail panel and drop the map/chip
-// highlight so the user can back out of a selection.
+// Deselect the pinned country or pairing: clear both detail panels and drop
+// map/chip highlights so the user can back out of a selection.
 function clearCountrySelection() {
   selectedIso = null;
   selectedPair = null;
   renderCountryDetail(null);
+  renderPairingDetail(null);
   for (const chip of els.passportList.querySelectorAll('.passport-chip')) {
     chip.classList.remove('is-selected');
+  }
+  if (els.routesList) {
+    for (const card of els.routesList.querySelectorAll('.passport-route-card')) {
+      card.classList.remove('is-selected');
+    }
   }
   if (passportGeoLayer) passportGeoLayer.setStyle(styleForFeature);
   // Reverse the fitBounds zoom-in from selectCountry so backing out returns to
   // the full world view.
-  if (passportMap) passportMap.flyTo(PASSPORT_HOME_CENTER, PASSPORT_HOME_ZOOM, { duration: 0.6 });
+  if (passportMap) {
+    passportMap.flyTo(PASSPORT_HOME_CENTER, PASSPORT_HOME_ZOOM, { duration: 0.6 });
+    // Clearing restores the taller map; refresh after CSS settles.
+    setTimeout(() => passportMap.invalidateSize(), 40);
+  }
 }
 
-// Pin a route pairing: show its flights in the detail panel, highlight both
-// endpoint countries on the map, and frame them together. `pair` needs only
-// { key, fromIso, toIso }; a country with no matching polygon (or unknown
-// endpoint) is simply skipped when framing.
+// Pin a route pairing: show its flights in the Routes detail panel. When the
+// world map is available, highlight both endpoint countries and frame them.
+// `pair` needs only { key, fromIso, toIso }; a country with no matching polygon
+// (or unknown endpoint) is simply skipped when framing.
 function selectPairing(pair) {
   selectedPair = { key: pair.key, fromIso: pair.fromIso, toIso: pair.toIso };
   selectedIso = null;
   renderPairingDetail(selectedPair);
+  renderCountryDetail(null);
   for (const chip of els.passportList.querySelectorAll('.passport-chip')) {
-    chip.classList.toggle('is-selected', chip.dataset.pair === pair.key);
+    chip.classList.remove('is-selected');
+  }
+  if (els.routesList) {
+    for (const card of els.routesList.querySelectorAll('.passport-route-card')) {
+      card.classList.toggle('is-selected', card.dataset.pair === pair.key);
+    }
   }
   if (passportGeoLayer) passportGeoLayer.setStyle(styleForFeature);
   const layers = [pair.fromIso, pair.toIso]
@@ -2011,17 +2062,22 @@ function selectPairing(pair) {
   }
 }
 
-// Select a country: update the detail panel, restyle the map to highlight it,
-// and frame it. Safe to call before the map/layer exists.
+// Select a destination country: update the detail panel, restyle the map to
+// highlight it, and frame it. Safe to call before the map/layer exists.
 function selectCountry(iso, { pan = false } = {}) {
-  if (!iso || !passport.countries[iso]) return;
+  if (!iso || !destinationFlightCount(iso)) return;
   selectedIso = iso;
-  // A map click supersedes any pinned pairing; they share the detail panel.
+  // A map/country click supersedes any pinned pairing.
   selectedPair = null;
   renderCountryDetail(iso);
-  // A map click pins a single country, so no pairing chip is selected.
+  renderPairingDetail(null);
   for (const chip of els.passportList.querySelectorAll('.passport-chip')) {
-    chip.classList.remove('is-selected');
+    chip.classList.toggle('is-selected', chip.dataset.iso === iso);
+  }
+  if (els.routesList) {
+    for (const card of els.routesList.querySelectorAll('.passport-route-card')) {
+      card.classList.remove('is-selected');
+    }
   }
   if (passportGeoLayer) passportGeoLayer.setStyle(styleForFeature);
   const layer = findLayerForIso(iso);
@@ -2035,6 +2091,9 @@ function selectCountry(iso, { pan = false } = {}) {
       }
     }
   }
+  // Selection expands the detail panel and shrinks the map; refresh Leaflet's
+  // size after the CSS layout settles.
+  if (passportMap) setTimeout(() => passportMap.invalidateSize(), 40);
 }
 
 // ---- Logbook tabs: aircraft (types / registrations) + airlines ------------
@@ -2070,16 +2129,9 @@ function renderLogHead(thead, labels) {
   thead.appendChild(tr);
 }
 
-// The Aircraft tab is one table that groups either by aircraft type (model) or
-// by individual registration (tail). Both views share the same columns
-// (identifier, secondary label, rarity, count) so switching only reframes the
-// data rather than changing the layout.
-let aircraftGroupBy = 'type';
-
-// The most-seen registration we've logged of a given type, used to show a
-// representative photo in the "by type" view (Planespotters looks photos up by
-// registration/hex, never by bare type code). Returns '' when we've logged the
-// type but never captured a tail for it.
+// The Aircraft tab is a type logbook (ICAO type code + model name). Photos are
+// looked up via a representative registration of that type, since Planespotters
+// keys photos by registration/hex rather than bare type code.
 function repRegForType(typeCode) {
   const code = (typeCode || '').toUpperCase();
   let best = '';
@@ -2102,8 +2154,8 @@ function loadPhotoInto(holder) {
   const reg = holder.dataset.reg;
   if (!reg) return;
   fetchAircraftPhoto(reg).then((photo) => {
-    // The tab may have been re-rendered (grouping toggled) while awaiting, so
-    // only paint holders still attached to the document.
+    // The tab may have been re-rendered while awaiting, so only paint holders
+    // still attached to the document.
     if (holder.isConnected) fillPhotoHolder(holder, photo);
   });
 }
@@ -2168,10 +2220,7 @@ function renderAircraftTab() {
   const tbody = els.aircraftBody;
   if (!tbody) return;
 
-  const byType = aircraftGroupBy !== 'reg';
-  if (head) {
-    renderLogHead(head, byType ? ['Photo', 'Type', 'Model', 'Rarity', 'Seen'] : ['Photo', 'Registration', 'Type', 'Rarity', 'Seen']);
-  }
+  if (head) renderLogHead(head, ['Photo', 'Type', 'Model', 'Rarity', 'Seen']);
 
   if (aircraftPhotoObserver) aircraftPhotoObserver.disconnect();
   if ('IntersectionObserver' in window) {
@@ -2187,17 +2236,16 @@ function renderAircraftTab() {
   }
 
   tbody.innerHTML = '';
-  const rows = logbookRows(byType ? passport.types : passport.regs);
+  const rows = logbookRows(passport.types);
   if (!rows.length) {
-    renderEmptyRow(tbody, 5, byType ? 'No aircraft types logged yet.' : 'No registrations logged yet.');
+    renderEmptyRow(tbody, 5, 'No aircraft types logged yet.');
     return;
   }
   for (const r of rows) {
     const tr = document.createElement('tr');
-    const photoReg = byType ? repRegForType(r.key) : r.key;
-    tr.appendChild(makePhotoCell(photoReg, r.key));
+    tr.appendChild(makePhotoCell(repRegForType(r.key), r.key));
     tr.appendChild(makeCell(r.key, 'log-code'));
-    tr.appendChild(makeCell((byType ? r.n : r.ty) || '\u2014', 'log-name'));
+    tr.appendChild(makeCell(r.n || '\u2014', 'log-name'));
     tr.appendChild(rarityTagCell(r.rare, r.mil));
     tr.appendChild(makeCell(r.c, 'log-count'));
     tbody.appendChild(tr);
@@ -2538,50 +2586,50 @@ function computeBadges() {
     {
       id: 'globetrotter',
       name: 'Globetrotter',
-      earned: countryCount >= 10,
-      detail: countryCount >= 10 ? `${countryCount} countries` : '',
-      hint: 'Collect 10 countries',
-      progress: countryCount < 10 ? `${countryCount} / 10 countries` : '',
+      earned: countryCount >= 20,
+      detail: countryCount >= 20 ? `${countryCount} countries` : '',
+      hint: 'Collect 20 countries',
+      progress: countryCount < 20 ? `${countryCount} / 20 countries` : '',
     },
-    tier('globetrotter2', 'Globetrotter II', countryCount, 25, 'countries'),
-    tier('globetrotter3', 'Globetrotter III', countryCount, 50, 'countries'),
+    tier('globetrotter2', 'Globetrotter II', countryCount, 50, 'countries'),
+    tier('globetrotter3', 'Globetrotter III', countryCount, 100, 'countries'),
     {
       id: 'spotter',
       name: 'Type Spotter',
-      earned: typeCount >= 20,
-      detail: typeCount >= 20 ? `${typeCount} types` : '',
-      hint: 'Log 20 aircraft types',
-      progress: typeCount < 20 ? `${typeCount} / 20 types` : '',
+      earned: typeCount >= 40,
+      detail: typeCount >= 40 ? `${typeCount} types` : '',
+      hint: 'Log 40 aircraft types',
+      progress: typeCount < 40 ? `${typeCount} / 40 types` : '',
     },
-    tier('typehunter', 'Type Hunter', typeCount, 50, 'types'),
-    tier('typemaster', 'Type Master', typeCount, 100, 'types'),
+    tier('typehunter', 'Type Hunter', typeCount, 100, 'types'),
+    tier('typemaster', 'Type Master', typeCount, 200, 'types'),
     {
       id: 'fleet',
       name: 'Fleet Tracker',
-      earned: regCount >= 50,
-      detail: regCount >= 50 ? `${regCount} tails` : '',
-      hint: 'Log 50 registrations',
-      progress: regCount < 50 ? `${regCount} / 50 tails` : '',
+      earned: regCount >= 100,
+      detail: regCount >= 100 ? `${regCount} tails` : '',
+      hint: 'Log 100 registrations',
+      progress: regCount < 100 ? `${regCount} / 100 tails` : '',
     },
-    tier('tailchaser', 'Tail Chaser', regCount, 100, 'tails'),
-    tier('spotterspotter', "Spotter's Spotter", regCount, 250, 'tails'),
-    tier('airlinebuff', 'Airline Buff', airlineCount, 15, 'airlines'),
-    tier('alliance', 'Alliance', airlineCount, 30, 'airlines'),
+    tier('tailchaser', 'Tail Chaser', regCount, 250, 'tails'),
+    tier('spotterspotter', "Spotter's Spotter", regCount, 500, 'tails'),
+    tier('airlinebuff', 'Airline Buff', airlineCount, 30, 'airlines'),
+    tier('alliance', 'Alliance', airlineCount, 60, 'airlines'),
     {
       id: 'frequentflyer',
       name: 'Frequent Flyer',
-      earned: topReg.count >= 5,
-      detail: topReg.count >= 5 ? `${topReg.key} seen ${topReg.count}\u00d7` : '',
-      hint: 'See one tail 5 times',
-      progress: topReg.count && topReg.count < 5 ? `best ${topReg.count}\u00d7` : '',
+      earned: topReg.count >= 15,
+      detail: topReg.count >= 15 ? `${topReg.key} seen ${topReg.count}\u00d7` : '',
+      hint: 'See one tail 15 times',
+      progress: topReg.count && topReg.count < 15 ? `best ${topReg.count}\u00d7` : '',
     },
     {
       id: 'loyaltycard',
       name: 'Loyalty Card',
-      earned: topAirline.count >= 25,
-      detail: topAirline.count >= 25 ? `${topAirline.key} \u00d7${topAirline.count}` : '',
-      hint: 'See one airline 25 times',
-      progress: topAirline.count && topAirline.count < 25 ? `best ${topAirline.count}\u00d7` : '',
+      earned: topAirline.count >= 75,
+      detail: topAirline.count >= 75 ? `${topAirline.key} \u00d7${topAirline.count}` : '',
+      hint: 'See one airline 75 times',
+      progress: topAirline.count && topAirline.count < 75 ? `best ${topAirline.count}\u00d7` : '',
     },
 
     // ---- Rarity / iconic --------------------------------------------------
@@ -3361,6 +3409,7 @@ async function sharePassportCard() {
 
 const PASSPORT_PANELS = {
   countries: 'tabCountries',
+  routes: 'tabRoutes',
   aircraft: 'tabAircraft',
   airlines: 'tabAirlines',
   badges: 'tabBadges',
@@ -3373,6 +3422,9 @@ function refreshOpenPassportTab() {
     case 'countries':
       renderPassportStats();
       if (passportGeoLayer) passportGeoLayer.setStyle(styleForFeature);
+      break;
+    case 'routes':
+      renderPassportRoutes();
       break;
     case 'aircraft':
       renderAircraftTab();
@@ -3417,9 +3469,7 @@ function updatePassportOpenedLabel() {
   const opened = passport.opened;
   if (!opened) { el.textContent = ''; return; }
   const dateStr = new Date(opened).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' });
-  const days = Math.max(0, Math.floor((Date.now() - opened) / 86400000));
-  const ago = days <= 0 ? 'today' : days === 1 ? '1 day ago' : `${days} days ago`;
-  el.textContent = `Opened ${dateStr} \u00b7 ${ago}`;
+  el.textContent = `Opened ${dateStr}`;
 }
 
 async function openPassport() {
@@ -3484,20 +3534,25 @@ async function openPassport() {
         const iso = featureIso2(feature.properties);
         const props = feature.properties;
         const name = props.NAME || props.ADMIN || props.NAME_LONG || iso;
-        const entry = iso ? passport.countries[iso] : null;
-        let tip = `${name} \u2014 not seen yet`;
-        if (entry) {
-          const latest = entry.flights && entry.flights.length ? entry.flights[entry.flights.length - 1] : null;
-          tip = `${name} \u2014 ${entry.c} flight${entry.c === 1 ? '' : 's'}`;
-          if (latest) tip += `<br><span class="tip-flight">${flightLine(latest)}</span>`;
-          tip += '<br><span class="tip-hint">click for details</span>';
-        }
-        layer.bindTooltip(tip, { sticky: true });
-        // Click a visited country to pin its flights in the detail panel below
-        // the map, so the data is available without keeping the pointer on it.
-        if (entry) {
-          layer.on('click', () => selectCountry(iso));
-        }
+        const updateTip = () => {
+          const destFlights = iso ? destinationFlightsOf(iso) : [];
+          const destCount = destFlights.length;
+          let tip = `${name} \u2014 not seen yet`;
+          if (destCount > 0) {
+            const latest = destFlights[destFlights.length - 1];
+            tip = `${name} \u2014 ${destCount} flight${destCount === 1 ? '' : 's'} inbound`;
+            if (latest) tip += `<br><span class="tip-flight">${flightLine(latest)}</span>`;
+            tip += '<br><span class="tip-hint">click for details</span>';
+          }
+          layer.bindTooltip(tip, { sticky: true });
+        };
+        updateTip();
+        layer.on('mouseover', updateTip);
+        // Click a destination country to pin its inbound flights in the detail
+        // panel below the map. Checked at click time so late sightings still work.
+        layer.on('click', () => {
+          if (iso && destinationFlightCount(iso)) selectCountry(iso);
+        });
       },
     }).addTo(passportMap);
   } else if (passportGeoLayer) {
@@ -3559,20 +3614,6 @@ function wirePassport() {
     const btn = e.target.closest('[data-tab]');
     if (btn) showPassportTab(btn.dataset.tab);
   });
-  // Aircraft tab: toggle between grouping by type and by registration.
-  if (els.aircraftGroupBy) {
-    els.aircraftGroupBy.addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-group]');
-      if (!btn || btn.dataset.group === aircraftGroupBy) return;
-      aircraftGroupBy = btn.dataset.group;
-      for (const b of els.aircraftGroupBy.querySelectorAll('[data-group]')) {
-        const on = b.dataset.group === aircraftGroupBy;
-        b.classList.toggle('is-active', on);
-        b.setAttribute('aria-pressed', String(on));
-      }
-      renderAircraftTab();
-    });
-  }
   // Aircraft-photo lightbox: close via its button or by clicking the backdrop.
   if (els.photoLightboxClose) {
     els.photoLightboxClose.addEventListener('click', closePhotoLightbox);
@@ -3582,20 +3623,28 @@ function wirePassport() {
       if (e.target === els.photoLightbox) closePhotoLightbox();
     });
   }
-  // Clicking a day chip pins that origin -> destination pairing, highlights
-  // both endpoint countries on the map and frames them together.
+  // Clicking a Countries-tab chip pins that destination country.
   els.passportList.addEventListener('click', (e) => {
     const chip = e.target.closest('.passport-chip');
-    if (!chip || !chip.dataset.pair) return;
-    // Clicking the pairing that's already pinned toggles the selection off.
-    if (selectedPair && chip.dataset.pair === selectedPair.key) clearCountrySelection();
-    else
-      selectPairing({
-        key: chip.dataset.pair,
-        fromIso: chip.dataset.fromIso || '',
-        toIso: chip.dataset.toIso || '',
-      });
+    if (!chip || !chip.dataset.iso) return;
+    // Clicking the country that's already pinned toggles the selection off.
+    if (selectedIso && chip.dataset.iso === selectedIso) clearCountrySelection();
+    else selectCountry(chip.dataset.iso, { pan: true });
   });
+  // Clicking a Routes-tab card pins that origin -> destination pairing.
+  if (els.routesList) {
+    els.routesList.addEventListener('click', (e) => {
+      const card = e.target.closest('.passport-route-card');
+      if (!card || !card.dataset.pair) return;
+      if (selectedPair && card.dataset.pair === selectedPair.key) clearCountrySelection();
+      else
+        selectPairing({
+          key: card.dataset.pair,
+          fromIso: card.dataset.fromIso || '',
+          toIso: card.dataset.toIso || '',
+        });
+    });
+  }
 }
 
 // ---- Fullscreen / immersive wall mode -------------------------------------
@@ -3958,12 +4007,11 @@ function wireDev() {
   });
 }
 
-// ---- Airport overlay + nearest-airport weather ----------------------------
+// ---- Airport overlay ------------------------------------------------------
 //
-// Both are backed by the bundled OurAirports subset (src/data/airports.json)
-// and refreshed whenever the center or range changes. The overlay is the set
-// of airports within the current range, drawn subtly on the scope; the weather
-// chip shows current conditions for the single nearest airport via Open-Meteo.
+// Backed by the bundled OurAirports subset (src/data/airports.json) and
+// refreshed whenever the center or range changes. Draws airports within the
+// current range subtly on the scope.
 
 // Fetch airports a little beyond the range too, so one just off the scope
 // still shows (drawn distinctly as "outside" by the radar) when your center is
@@ -3978,68 +4026,6 @@ async function refreshAirportOverlay() {
   } catch {
     radar.setAirports([]);
   }
-}
-
-// Conditions change slowly and Open-Meteo asks callers to be gentle, so the
-// weather is polled far less often than traffic.
-const WEATHER_REFRESH_MS = 10 * 60 * 1000;
-let weatherTimer = null;
-// Bumped on every refresh so a slow in-flight fetch from a previous center
-// can't overwrite the chip after the center has moved again.
-let weatherToken = 0;
-
-function renderWeatherChip(airport, wx) {
-  if (!els.wxLine) return;
-  if (!airport || !wx || (wx.tempC == null && !wx.condition && wx.windKt == null)) {
-    els.wxLine.hidden = true;
-    return;
-  }
-
-  // Code stays fixed-width (bold) at the start; everything else is one
-  // ellipsizing run so the row never overflows on small screens.
-  if (els.wxCode) els.wxCode.textContent = airportCode(airport);
-
-  // The code above already identifies the airport, so this run is just the
-  // weather: temperature, sky, and wind.
-  const parts = [];
-  if (wx.tempC != null) parts.push(`${Math.round(wx.tempC)}\u00b0C`);
-  if (wx.condition) parts.push(wx.condition);
-  if (wx.windKt != null) {
-    const dir = compassDir(wx.windDir);
-    const kt = Math.round(wx.windKt);
-    parts.push(kt === 0 ? 'calm' : dir ? `wind ${kt} kt ${dir}` : `wind ${kt} kt`);
-  }
-  if (els.wxText) els.wxText.textContent = parts.join('  \u00b7  ');
-
-  els.wxLine.hidden = false;
-}
-
-// Look up the nearest airport, fetch its current conditions, and paint the
-// chip. The token check drops a result that arrives after the center moved.
-async function refreshWeather() {
-  const token = ++weatherToken;
-  try {
-    const airport = await nearestAirport(center.lat, center.lon);
-    if (token !== weatherToken) return;
-    if (!airport) {
-      if (els.wxLine) els.wxLine.hidden = true;
-      return;
-    }
-    const wx = await fetchWeather(airport.lat, airport.lon);
-    if (token !== weatherToken) return;
-    renderWeatherChip(airport, wx);
-  } catch {
-    /* leave the chip as-is on a transient failure */
-  }
-}
-
-// Refresh both airport-derived features for the current center and (re)arm the
-// slow weather refresh timer. Called at startup and after a location change.
-function refreshLocationData() {
-  refreshAirportOverlay();
-  refreshWeather();
-  clearInterval(weatherTimer);
-  weatherTimer = setInterval(refreshWeather, WEATHER_REFRESH_MS);
 }
 
 // ---- Freshness tracking ---------------------------------------------------
@@ -4273,8 +4259,7 @@ async function poll() {
     await resolveLocation();
   }
   restartPolling();
-  // Populate the airport overlay and nearest-airport weather for the resolved
-  // center, and arm the periodic weather refresh.
-  refreshLocationData();
+  // Populate the airport overlay for the resolved center.
+  refreshAirportOverlay();
   setInterval(tick, 1000);
 })();

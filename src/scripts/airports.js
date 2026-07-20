@@ -3,11 +3,9 @@
 // `src/data/airports.json`: every large and medium airport worldwide with its
 // ICAO/IATA codes, name, city and coordinates. It's loaded via a dynamic
 // import so the ~170 KB (gzipped) dataset lands in its own lazy chunk rather
-// than the initial bundle, and both consumers share the single load:
-//   - the radar draws a subtle overlay of airports near the center, and
-//   - the HUD weather chip fetches conditions for the nearest airport.
-// No network request to a third party is involved; the data is part of the
-// static build.
+// than the initial bundle. The radar draws a subtle overlay of airports near
+// the center from it. No network request to a third party is involved; the
+// data is part of the static build.
 
 const EARTH_RADIUS_NM = 3440.065;
 const toRad = (d) => (d * Math.PI) / 180;
@@ -84,22 +82,4 @@ export async function airportsWithin(lat, lon, rangeNm) {
   }
   out.sort((p, q) => p.distanceNm - q.distanceNm);
   return out;
-}
-
-/**
- * The single nearest airport to (lat, lon) at any distance, annotated with its
- * distance in nm. Returns null if the dataset is unavailable.
- */
-export async function nearestAirport(lat, lon) {
-  const all = await loadAirports();
-  let best = null;
-  let bestD = Infinity;
-  for (const a of all) {
-    const d = haversineNm(lat, lon, a.lat, a.lon);
-    if (d < bestD) {
-      bestD = d;
-      best = a;
-    }
-  }
-  return best ? { ...best, distanceNm: bestD } : null;
 }

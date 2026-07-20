@@ -29,14 +29,11 @@ keyless, CORS-enabled public sources:
   straight from Planespotters' CDN in your browser, each credits its
   photographer and links back to the photo page, and JSON responses are cached
   for 24h in `localStorage` per their terms of use.
-- **[Open-Meteo](https://open-meteo.com)** — keyless, CORS-enabled, worldwide
-  current conditions (temperature, WMO weather code, wind) for the nearest
-  airport, shown as a subtle weather chip in the HUD.
 - **[OurAirports](https://ourairports.com)** — a curated public-domain subset
   (every large + medium airport worldwide) is **bundled** with the app as
   `src/data/airports.json` and lazy-loaded in its own chunk. It powers the
-  subtle airport overlay on the scope and picks the nearest airport for the
-  weather chip. No third-party request; it's part of the static build.
+  subtle airport overlay on the scope. No third-party request; it's part of
+  the static build.
 
 These are free for non-commercial use and rate-limited to ~1 request/second.
 
@@ -45,12 +42,6 @@ These are free for non-commercial use and rate-limited to ~1 request/second.
 > headers on its preflight, so a static browser-only site can't call it. The
 > static standing-data files it's built on *are* CORS-enabled, so we read those
 > directly and do the plausibility check ourselves.
-
-> **Why not aviationweather.gov METAR?** It's the natural METAR source, but it
-> sends no CORS headers (their docs: *"Cross-origin resource sharing is not
-> permitted at this time."*), so a browser-only static site can't read it — the
-> same wall as `routeset` above. Open-Meteo is keyless, CORS-enabled and
-> worldwide, so the weather chip reads current conditions from it instead.
 
 ## Run it
 
@@ -93,9 +84,6 @@ Edit `src/config.js`:
 - **Airport overlay** — large/medium airports within range are drawn subtly on
   the scope (a faint ring, with a code label on the nearest few) from a bundled
   OurAirports subset, so blips have geographic context.
-- **Nearest-airport weather** — a faint HUD chip shows current conditions
-  (temperature, sky, wind) for the closest airport, via Open-Meteo. Refreshed
-  on a location change and every 10 minutes.
 
 ## Dev / demo mode
 
@@ -110,12 +98,12 @@ with no real traffic. "Clear demo" removes them.
 | File | Role |
 | --- | --- |
 | `src/config.js` | User settings |
-| `src/scripts/api.js` | Fetch positions + resolve/cache routes + special-flight flags + nearest-airport weather |
-| `src/scripts/airports.js` | Bundled-airport lookup (nearest + within-range) |
+| `src/scripts/api.js` | Fetch positions + resolve/cache routes + special-flight flags |
+| `src/scripts/airports.js` | Bundled-airport lookup (within-range) |
 | `src/data/airports.json` | Bundled OurAirports subset (large + medium airports) |
 | `src/scripts/radar.js` | Canvas radar renderer (sweep, blips, phosphor, labels, highlighting, airport overlay) |
 | `src/scripts/audio.js` | Web Audio synth for the ping + hero chime (no assets) |
-| `src/scripts/main.js` | Geolocation, polling loop, hero/wake-lock wiring, airport overlay + weather |
+| `src/scripts/main.js` | Geolocation, polling loop, hero/wake-lock wiring, airport overlay |
 | `src/pages/index.astro` | HUD shell + styling |
 
 ## Notes / limitations
