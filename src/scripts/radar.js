@@ -1708,64 +1708,41 @@ export class Radar {
   // iOS Compass app. Geographic North is marked separately by _drawNorthArrow.
   _drawHeadingLine(ctx, cx, cy, R) {
     if (!this.compassMode) return;
-    // Screen-up = facing direction (view heading sits at the top).
-    const tipX = cx;
-    const tipY = cy - R;
+    // Screen-up = facing direction (view heading sits at the top). Extends
+    // a little past the outer ring; kept inside the canvas margin (~22px).
+    const tipY = cy - (R + 14);
     const accent = [180, 255, 210];
 
     ctx.save();
     ctx.lineCap = "round";
-
-    // Soft spoke from just outside the center marker to the outer ring.
-    const grad = ctx.createLinearGradient(cx, cy - 10, tipX, tipY);
-    grad.addColorStop(0, rgba(accent, 0.05));
-    grad.addColorStop(0.55, rgba(accent, 0.35));
-    grad.addColorStop(1, rgba(accent, 0.85));
-    ctx.strokeStyle = grad;
+    ctx.strokeStyle = rgba(accent, 0.85);
     ctx.lineWidth = 2;
-    ctx.shadowColor = rgba(accent, 0.55);
-    ctx.shadowBlur = 6;
     ctx.beginPath();
     ctx.moveTo(cx, cy - 10);
-    ctx.lineTo(tipX, tipY);
+    ctx.lineTo(cx, tipY);
     ctx.stroke();
-    ctx.shadowBlur = 0;
-
-    // Chevron at the rim — the "you are facing this way" marker.
-    const ah = 8;
-    const half = 6;
-    ctx.beginPath();
-    ctx.moveTo(tipX, tipY - 2);
-    ctx.lineTo(tipX - half, tipY + ah);
-    ctx.lineTo(tipX + half, tipY + ah);
-    ctx.closePath();
-    ctx.fillStyle = rgba(accent, 0.95);
-    ctx.fill();
-
     ctx.restore();
   }
 
-  // Distinct north arrow on the rim while compass-locked, so the rotated scope
-  // stays readable even when the cardinal "N" text is suppressed.
+  // Compact north mark on the rim while compass-locked. Sized to fit in the
+  // scope's outer margin so the "N" isn't clipped off the canvas.
   _drawNorthArrow(ctx, cx, cy, R) {
     if (!this.compassMode) return;
     const rad = this.screenBearing(0) * DEG;
     const dirX = Math.sin(rad);
     const dirY = -Math.cos(rad);
-    // Tip sits just outside the outer ring; base sits slightly inside.
-    const tipR = R + 16;
-    const baseR = R + 2;
+    // Arrow sits between the outer ring and the label (margin is ~22px).
+    const tipR = R + 7;
+    const baseR = R + 1;
     const tipX = cx + dirX * tipR;
     const tipY = cy + dirY * tipR;
     const baseX = cx + dirX * baseR;
     const baseY = cy + dirY * baseR;
     const perpX = -dirY;
     const perpY = dirX;
-    const half = 7;
+    const half = 5;
 
     ctx.save();
-    ctx.shadowColor = "rgba(0, 255, 120, 0.55)";
-    ctx.shadowBlur = 6;
     ctx.beginPath();
     ctx.moveTo(tipX, tipY);
     ctx.lineTo(baseX + perpX * half, baseY + perpY * half);
@@ -1773,12 +1750,12 @@ export class Radar {
     ctx.closePath();
     ctx.fillStyle = "rgba(180, 255, 210, 0.95)";
     ctx.fill();
-    ctx.shadowBlur = 0;
     ctx.font = `bold 11px ${FONT_STACK}`;
     ctx.fillStyle = "rgba(180, 255, 210, 0.95)";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("N", cx + dirX * (R + 26), cy + dirY * (R + 26));
+    // Same radius as the ordinary E/S/W cardinal labels.
+    ctx.fillText("N", cx + dirX * (R + 14), cy + dirY * (R + 14));
     ctx.restore();
   }
 
