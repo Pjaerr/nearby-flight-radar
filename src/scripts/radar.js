@@ -781,7 +781,7 @@ export class Radar {
     const { x, y } = this._clientToCanvas(clientX, clientY);
     const cx = this.size / 2;
     const cy = this.size / 2;
-    const R = this.size / 2 - 22;
+    const R = this.size / 2 - 36;
     const HIT_R = 20; // generous so small blips are easy to tap
     let best = null;
     let bestD2 = HIT_R * HIT_R;
@@ -1102,7 +1102,7 @@ export class Radar {
 
     const cx = size / 2;
     const cy = size / 2;
-    const R = size / 2 - 22; // leave margin for range labels
+    const R = size / 2 - 36; // margin for cardinals + outside lubber tick
 
     this._drawBackground(ctx, cx, cy, R);
     this._drawGrid(ctx, cx, cy, R);
@@ -1714,8 +1714,8 @@ export class Radar {
   // Deliberately thick so it doesn't read as the sweep arm.
   _drawHeadingLine(ctx, cx, cy, R) {
     if (!this.compassMode) return;
-    const y0 = cy - R - 1;
-    const y1 = cy - R - 16;
+    const y0 = cy - R - 2;
+    const y1 = cy - R - 32;
     const accent = [200, 255, 220];
 
     ctx.save();
