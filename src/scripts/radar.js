@@ -489,6 +489,13 @@ export class Radar {
 
     this.sweepAngle = 0; // radians, 0 = North, clockwise
     this.prevSweepAngle = 0;
+    // Device compass heading (degrees clockwise from geographic North) that
+    // should sit at the top of the scope when compass mode is on. 0 = north-up.
+    // Geographic bearings in the blip store are unchanged; drawing and hit-
+    // testing subtract this so the whole PPI rotates under the sweep.
+    this.viewHeadingDeg = 0;
+    // When true, a north arrow is drawn so the rotated scope stays readable.
+    this.compassMode = false;
     this.lastFrame = 0;
     // `running` is the caller's intent (start/stop). The loop only actually
     // animates when it's also on screen and the tab is visible, so a scope
@@ -542,7 +549,34 @@ export class Radar {
     if (typeof ms === "number" && ms > 0) this.expectedPollMs = ms;
   }
 
+  /**
+   * Set the heading (degrees clockwise from North) that should appear at the
+   * top of the scope. Pass 0 for classic north-up.
+   */
+  setViewHeading(deg) {
+    if (typeof deg !== "number" || !Number.isFinite(deg)) return;
+    this.viewHeadingDeg = ((deg % 360) + 360) % 360;
+  }
+
+  /** Toggle the north-arrow overlay used while compass-locked. */
+  setCompassMode(on) {
+    this.compassMode = !!on;
+    if (!this.compassMode) this.viewHeadingDeg = 0;
+  }
+
+  /**
+   * Convert a geographic bearing (0 = North, clockwise) into a screen angle
+   * for the current view heading (0 = top of canvas, clockwise).
+   */
+  screenBearing(geoDeg) {
+    if (typeof geoDeg !== "number" || !Number.isFinite(geoDeg)) return 0;
+    const h = this.viewHeadingDeg || 0;
+    return (((geoDeg - h) % 360) + 360) % 360;
+  }
+
   // Display position for drawing / hit-testing (interpolated when enabled).
+  // Bearings are still geographic; callers that plot to the canvas must run
+  // them through screenBearing() / _project().
   _displayPos(b) {
     if (!b) return { d: 0, bearing: 0 };
     return {
@@ -754,10 +788,7 @@ export class Radar {
     for (const b of this.blips.values()) {
       if (!this._isReady(b)) continue;
       const { d, bearing } = this._displayPos(b);
-      const rr = Math.min(1, Math.max(0, d / this.rangeNm)) * R;
-      const rad = bearing * DEG;
-      const bx = cx + Math.sin(rad) * rr;
-      const by = cy - Math.cos(rad) * rr;
+      const { x: bx, y: by } = this._project(cx, cy, R, d, bearing);
       const d2 = (bx - x) ** 2 + (by - y) ** 2;
       if (d2 <= bestD2) {
         bestD2 = d2;
@@ -1080,6 +1111,7 @@ export class Radar {
     this._drawFocus(ctx, cx, cy, R);
     this._drawBlips(ctx, cx, cy, R);
     this._drawCenter(ctx, cx, cy);
+    this._drawNorthArrow(ctx, cx, cy, R);
 
     ctx.restore();
 
@@ -1134,17 +1166,17 @@ export class Radar {
     }
     ctx.globalAlpha = 1;
 
-    // Cardinal spokes.
+    // Cardinal spokes (geographic bearings — rotate with the view heading).
     ctx.strokeStyle = "rgba(0, 255, 120, 0.24)";
     for (let a = 0; a < 360; a += 30) {
-      const rad = a * DEG;
+      const rad = this.screenBearing(a) * DEG;
       ctx.beginPath();
       ctx.moveTo(cx, cy);
       ctx.lineTo(cx + Math.sin(rad) * R, cy - Math.cos(rad) * R);
       ctx.stroke();
     }
 
-    // Compass labels.
+    // Compass labels (geographic N/E/S/W — they rotate with view heading).
     ctx.fillStyle = "rgba(0, 255, 120, 0.8)";
     ctx.font = `bold 13px ${FONT_STACK}`;
     ctx.textAlign = "center";
@@ -1155,7 +1187,10 @@ export class Radar {
       ["W", 270],
     ];
     for (const [label, deg] of marks) {
-      const rad = deg * DEG;
+      // In compass mode the dedicated north arrow replaces the "N" text so we
+      // don't double-label the same rim position.
+      if (this.compassMode && label === "N") continue;
+      const rad = this.screenBearing(deg) * DEG;
       const lx = cx + Math.sin(rad) * (R + 12);
       const ly = cy - Math.cos(rad) * (R + 12);
       ctx.fillText(label, lx, ly);
@@ -1196,7 +1231,7 @@ export class Radar {
       // Un-clamped radius so airports past the range sit beyond the outer ring.
       const rr = Math.max(0, ap.distanceNm / this.rangeNm) * R;
       if (rr > maxR) continue; // too far outside to show without clipping
-      const rad = ap.bearingDeg * DEG;
+      const rad = this.screenBearing(ap.bearingDeg) * DEG;
       const x = cx + Math.sin(rad) * rr;
       const y = cy - Math.cos(rad) * rr;
 
@@ -1236,12 +1271,16 @@ export class Radar {
   }
 
   _drawSweep(ctx, cx, cy, R) {
+    // Sweep angle is geographic (0 = North); rotate into screen space so the
+    // arm stays locked to true bearings while the view heading turns the scope.
+    const sweep =
+      this.sweepAngle - (this.viewHeadingDeg || 0) * DEG;
     // Afterglow wedge trailing behind the leading edge.
     const trail = 0.5; // radians of glowing trail
     const steps = 24;
     for (let i = 0; i < steps; i++) {
-      const a0 = this.sweepAngle - (trail * i) / steps;
-      const a1 = this.sweepAngle - (trail * (i + 1)) / steps;
+      const a0 = sweep - (trail * i) / steps;
+      const a1 = sweep - (trail * (i + 1)) / steps;
       const alpha = 0.2 * (1 - i / steps);
       ctx.beginPath();
       ctx.moveTo(cx, cy);
@@ -1253,8 +1292,8 @@ export class Radar {
     }
 
     // Leading edge line.
-    const ex = cx + Math.sin(this.sweepAngle) * R;
-    const ey = cy - Math.cos(this.sweepAngle) * R;
+    const ex = cx + Math.sin(sweep) * R;
+    const ey = cy - Math.cos(sweep) * R;
     const grad = ctx.createLinearGradient(cx, cy, ex, ey);
     grad.addColorStop(0, "rgba(0, 255, 120, 0.1)");
     grad.addColorStop(1, "rgba(120, 255, 180, 0.9)");
@@ -1280,7 +1319,7 @@ export class Radar {
     // the bearing needle and the blip.
     this._drawFocusRoute(ctx, cx, cy, R);
 
-    const rad = bearing * DEG;
+    const rad = this.screenBearing(bearing) * DEG;
     const dirX = Math.sin(rad);
     const dirY = -Math.cos(rad);
     const tipX = cx + dirX * R;
@@ -1328,7 +1367,8 @@ export class Radar {
     ctx.fillStyle = rgba([180, 255, 210], 0.95);
     ctx.fill();
 
-    // Bearing readout just outside the ring, e.g. "045\u00b0".
+    // Bearing readout just outside the ring, e.g. "045°".
+    // Always geographic true bearing (not screen-relative).
     const brg = Math.round(((bearing % 360) + 360) % 360) % 360;
     ctx.font = `bold 12px ${FONT_STACK}`;
     ctx.fillStyle = rgba([180, 255, 210], 0.95);
@@ -1354,7 +1394,7 @@ export class Radar {
     if (typeof bearing !== "number") return;
 
     const rr = Math.min(1, Math.max(0, d / this.rangeNm)) * R;
-    const rad = bearing * DEG;
+    const rad = this.screenBearing(bearing) * DEG;
     const px = cx + Math.sin(rad) * rr;
     const py = cy - Math.cos(rad) * rr;
     const accent = [150, 255, 190];
@@ -1368,8 +1408,9 @@ export class Radar {
 
     // Best guess ahead: dashed ray from the plane along its ground track.
     if (typeof b.trackDeg === "number") {
-      const dx = Math.sin(b.trackDeg * DEG);
-      const dy = -Math.cos(b.trackDeg * DEG);
+      const trackScreen = this.screenBearing(b.trackDeg);
+      const dx = Math.sin(trackScreen * DEG);
+      const dy = -Math.cos(trackScreen * DEG);
       const fx = px - cx;
       const fy = py - cy;
       const bq = 2 * (fx * dx + fy * dy);
@@ -1461,10 +1502,7 @@ export class Radar {
       const { d, bearing } = this._displayPos(b);
       // Plot position uses the fraction of the current range, so a contact
       // always sits at the correct ring regardless of the depth cue below.
-      const rr = Math.min(1, Math.max(0, d / this.rangeNm)) * R;
-      const rad = bearing * DEG;
-      const x = cx + Math.sin(rad) * rr;
-      const y = cy - Math.cos(rad) * rr;
+      const { x, y } = this._project(cx, cy, R, d, bearing);
 
       // Soft depth from ring position (fraction of the current range): contacts
       // near the outer ring shrink slightly (down to ~75%) and flare a touch
@@ -1518,7 +1556,9 @@ export class Radar {
         ctx,
         x,
         y,
-        b.trackDeg,
+        typeof b.trackDeg === "number"
+          ? this.screenBearing(b.trackDeg)
+          : b.trackDeg,
         glow,
         sizeFactor,
         b.sizeClass,
@@ -1562,10 +1602,7 @@ export class Radar {
       if (b.intensity <= 0.02) continue;
       if (b.labelAlpha <= 0.03) continue;
       const { d, bearing } = this._displayPos(b);
-      const rr = (d / this.rangeNm) * R;
-      const rad = bearing * DEG;
-      const x = cx + Math.sin(rad) * rr;
-      const y = cy - Math.cos(rad) * rr;
+      const { x, y } = this._project(cx, cy, R, d, bearing);
       const { lines, w, h } = this._measureLabel(ctx, b);
       items.push({ b, x, y, lines, w, h });
     }
@@ -1655,13 +1692,51 @@ export class Radar {
     return ox * oy;
   }
 
-  // Convert a polar position (distance nm + bearing deg) to canvas x/y using
-  // the same range-fraction mapping as the blips, so a trail point lands
-  // exactly where the contact sat when that fix arrived.
+  // Convert a polar position (distance nm + geographic bearing deg) to canvas
+  // x/y using the same range-fraction mapping as the blips, so a trail point
+  // lands exactly where the contact sat when that fix arrived. Applies the
+  // current view heading so trails rotate with compass mode.
   _project(cx, cy, R, d, bearingDeg) {
     const rr = Math.min(1, Math.max(0, d / this.rangeNm)) * R;
-    const rad = bearingDeg * DEG;
+    const rad = this.screenBearing(bearingDeg) * DEG;
     return { x: cx + Math.sin(rad) * rr, y: cy - Math.cos(rad) * rr };
+  }
+
+  // Distinct north arrow on the rim while compass-locked, so the rotated scope
+  // stays readable even when the cardinal "N" text is suppressed.
+  _drawNorthArrow(ctx, cx, cy, R) {
+    if (!this.compassMode) return;
+    const rad = this.screenBearing(0) * DEG;
+    const dirX = Math.sin(rad);
+    const dirY = -Math.cos(rad);
+    // Tip sits just outside the outer ring; base sits slightly inside.
+    const tipR = R + 16;
+    const baseR = R + 2;
+    const tipX = cx + dirX * tipR;
+    const tipY = cy + dirY * tipR;
+    const baseX = cx + dirX * baseR;
+    const baseY = cy + dirY * baseR;
+    const perpX = -dirY;
+    const perpY = dirX;
+    const half = 7;
+
+    ctx.save();
+    ctx.shadowColor = "rgba(0, 255, 120, 0.55)";
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(baseX + perpX * half, baseY + perpY * half);
+    ctx.lineTo(baseX - perpX * half, baseY - perpY * half);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(180, 255, 210, 0.95)";
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.font = `bold 11px ${FONT_STACK}`;
+    ctx.fillStyle = "rgba(180, 255, 210, 0.95)";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("N", cx + dirX * (R + 26), cy + dirY * (R + 26));
+    ctx.restore();
   }
 
   // Draw the fading phosphor tail behind a blip: a tapered smear through its

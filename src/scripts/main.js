@@ -43,6 +43,7 @@ const els = {
   rangeValue: document.getElementById('range-value'),
   fullscreen: document.getElementById('fullscreen-btn'),
   sound: document.getElementById('sound-btn'),
+  compass: document.getElementById('compass-btn'),
   apply: document.getElementById('range-apply'),
   // Dev / demo panel.
   devPanel: document.getElementById('dev-panel'),
@@ -50,6 +51,7 @@ const els = {
   devToggle: document.getElementById('dev-toggle'),
   // Location picker
   centerEdit: document.getElementById('center-edit'),
+  centerLocate: document.getElementById('center-locate'),
   centerModal: document.getElementById('center-modal'),
   centerClose: document.getElementById('center-close'),
   centerMap: document.getElementById('center-map'),
@@ -392,15 +394,22 @@ const radar = new Radar(els.canvas, {
     // Log the contact into the passport's spotting books + stats (deferred to
     // idle so the render frame stays smooth).
     queueSighting(b);
+    // Subtle haptic on first appearance (mobile; no-op where unsupported).
+    vibrateNewContact();
   },
   // Radar ping as the sweep crosses a contact (no-op while muted). Pass the
   // contact's bearing so the blip pans to where it sits on the scope. The
   // first illumination of a new contact gets the stronger "acquired" hit
   // (`announced` is still false here — radar sets it right after onPing).
-  onPing: (b) =>
-    audio.ping(b?.displayBearingDeg ?? b?.bearingDeg, {
+  // When compass-locked, pan uses the screen bearing so L/R matches the PPI.
+  onPing: (b) => {
+    const geo = b?.displayBearingDeg ?? b?.bearingDeg;
+    const bearing =
+      typeof geo === 'number' ? radar.screenBearing(geo) : geo;
+    audio.ping(bearing, {
       first: b != null && !b.announced,
-    }),
+    });
+  },
   // Toggle the focus-mode banner as the user locks onto / releases a contact
   // (also fires when a focused contact leaves range and focus auto-clears).
   onFocusChange: (b) => updateFocusUI(b),
@@ -1056,8 +1065,9 @@ function hudLabel(c) {
 }
 
 // Wraps the callback-based Geolocation API in a promise and returns a
-// normalized center object.
-function getGeolocation() {
+// normalized center object. Pass `opts` to override the default accuracy /
+// cache window (e.g. `{ maximumAge: 0 }` when recentering while on the move).
+function getGeolocation(opts = {}) {
   return new Promise((resolve, reject) => {
     if (!('geolocation' in navigator)) {
       reject(new Error('Geolocation unavailable'));
@@ -1072,7 +1082,7 @@ function getGeolocation() {
           short: 'My location',
         }),
       reject,
-      { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 }
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000, ...opts }
     );
   });
 }
@@ -1331,6 +1341,27 @@ async function useMyLocation() {
   }
 }
 
+// One-tap recenter from the HUD — skips the Set modal. Asks for a fresh fix
+// (no cached position) so it stays useful while the user is on the move.
+async function locateHere() {
+  if (!('geolocation' in navigator)) {
+    setStatus('Geolocation unavailable on this device.', 'warn');
+    return;
+  }
+  const btn = els.centerLocate;
+  if (btn.disabled) return;
+  btn.disabled = true;
+  setStatus('Requesting your location\u2026');
+  try {
+    const c = await getGeolocation({ enableHighAccuracy: true, maximumAge: 0, timeout: 12000 });
+    applyCenter(c);
+  } catch {
+    setStatus('Location unavailable or denied.', 'warn');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function openCenterPicker() {
   els.centerModal.hidden = false;
   els.centerSearch.value = '';
@@ -1390,6 +1421,7 @@ function applyCenter(c) {
 
 function wireCenterPicker() {
   els.centerEdit.addEventListener('click', openCenterPicker);
+  els.centerLocate.addEventListener('click', locateHere);
   els.centerClose.addEventListener('click', closeCenterPicker);
   els.centerSearchBtn.addEventListener('click', handleCenterSearch);
   els.centerSearch.addEventListener('keydown', (e) => {
@@ -3721,6 +3753,168 @@ function wireSound() {
   els.sound.addEventListener('click', () => setSound(!audio.enabled));
 }
 
+// ---- New-contact haptic ---------------------------------------------------
+//
+// A short vibration the first time a contact flares onto the scope. No-op on
+// browsers without Vibration API (notably iOS Safari).
+
+function vibrateNewContact() {
+  if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') {
+    return;
+  }
+  try {
+    navigator.vibrate(18);
+  } catch {
+    /* ignore */
+  }
+}
+
+// ---- Compass / heading-up orientation -------------------------------------
+//
+// On mobile, lock the PPI so the top of the scope matches the device compass
+// heading. Requires DeviceOrientation (and on iOS 13+, an explicit permission
+// grant under a user gesture). Aircraft, airports, trails, and icons all
+// rotate with the view; a north arrow marks geographic North.
+
+let compassOn = false;
+let compassListening = false;
+let compassRawHeading = null;
+let compassSmoothHeading = 0;
+let compassRaf = 0;
+
+function compassSupported() {
+  if (typeof window === 'undefined') return false;
+  // Coarse pointer / no-hover ≈ phone/tablet; also allow any device that
+  // exposes orientation events (some laptops with magnetometers).
+  const touchLike =
+    (window.matchMedia &&
+      (window.matchMedia('(hover: none) and (pointer: coarse)').matches ||
+        window.matchMedia('(max-width: 900px)').matches)) ||
+    (navigator.maxTouchPoints || 0) > 0;
+  const hasOrientation =
+    'DeviceOrientationEvent' in window ||
+    'ondeviceorientationabsolute' in window;
+  return touchLike && hasOrientation;
+}
+
+function headingFromOrientationEvent(e) {
+  if (!e) return null;
+  // iOS: webkitCompassHeading is degrees clockwise from North.
+  if (typeof e.webkitCompassHeading === 'number' && Number.isFinite(e.webkitCompassHeading)) {
+    return ((e.webkitCompassHeading % 360) + 360) % 360;
+  }
+  // Absolute deviceorientation: alpha is the z-axis rotation; convert to
+  // compass heading (0 = North, clockwise).
+  if (typeof e.alpha === 'number' && Number.isFinite(e.alpha)) {
+    if (e.absolute === true || e.absolute == null) {
+      return ((360 - e.alpha) % 360 + 360) % 360;
+    }
+  }
+  return null;
+}
+
+function onDeviceOrientation(e) {
+  const h = headingFromOrientationEvent(e);
+  if (h == null) return;
+  compassRawHeading = h;
+}
+
+function lerpHeading(from, to, t) {
+  const d = ((to - from + 540) % 360) - 180;
+  return (from + d * t + 360) % 360;
+}
+
+function tickCompassSmoothing() {
+  compassRaf = 0;
+  if (!compassOn) return;
+  if (compassRawHeading != null) {
+    compassSmoothHeading = lerpHeading(
+      compassSmoothHeading,
+      compassRawHeading,
+      0.18,
+    );
+    radar.setViewHeading(compassSmoothHeading);
+  }
+  compassRaf = requestAnimationFrame(tickCompassSmoothing);
+}
+
+function startCompassListening() {
+  if (compassListening) return;
+  // Prefer absolute events when the browser fires them.
+  window.addEventListener('deviceorientationabsolute', onDeviceOrientation, true);
+  window.addEventListener('deviceorientation', onDeviceOrientation, true);
+  compassListening = true;
+  if (!compassRaf) compassRaf = requestAnimationFrame(tickCompassSmoothing);
+}
+
+function stopCompassListening() {
+  if (!compassListening) return;
+  window.removeEventListener('deviceorientationabsolute', onDeviceOrientation, true);
+  window.removeEventListener('deviceorientation', onDeviceOrientation, true);
+  compassListening = false;
+  compassRawHeading = null;
+  if (compassRaf) {
+    cancelAnimationFrame(compassRaf);
+    compassRaf = 0;
+  }
+}
+
+function syncCompassButton() {
+  if (!els.compass) return;
+  els.compass.setAttribute('aria-pressed', String(compassOn));
+  els.compass.title = compassOn
+    ? 'Unlock compass orientation'
+    : 'Orient radar to compass';
+}
+
+async function requestCompassPermission() {
+  // iOS 13+ requires an explicit permission prompt under a user gesture.
+  const DOE = window.DeviceOrientationEvent;
+  if (DOE && typeof DOE.requestPermission === 'function') {
+    try {
+      const result = await DOE.requestPermission();
+      return result === 'granted';
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function setCompass(on) {
+  if (!els.compass) return;
+  if (on) {
+    const ok = await requestCompassPermission();
+    if (!ok) {
+      compassOn = false;
+      radar.setCompassMode(false);
+      syncCompassButton();
+      setStatus('Compass permission denied', 'warn');
+      return;
+    }
+    compassOn = true;
+    compassSmoothHeading = compassRawHeading ?? 0;
+    radar.setCompassMode(true);
+    startCompassListening();
+  } else {
+    compassOn = false;
+    stopCompassListening();
+    radar.setCompassMode(false);
+  }
+  syncCompassButton();
+}
+
+function wireCompass() {
+  if (!els.compass) return;
+  if (!compassSupported()) {
+    els.compass.hidden = true;
+    return;
+  }
+  els.compass.hidden = false;
+  syncCompassButton();
+  els.compass.addEventListener('click', () => setCompass(!compassOn));
+}
+
 // ---- Screen wake lock -----------------------------------------------------
 //
 // Keep the display awake on a wall-mounted tablet. The lock is dropped
@@ -4248,6 +4442,7 @@ async function poll() {
   wirePassport();
   wireFullscreen();
   wireSound();
+  wireCompass();
   wireWakeLock();
   wireDev();
   wireFocus();

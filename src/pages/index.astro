@@ -58,6 +58,35 @@
     </div>
 
     <button
+      id="compass-btn"
+      type="button"
+      class="fs-btn compass-btn"
+      title="Orient radar to compass"
+      aria-label="Toggle compass orientation"
+      aria-pressed="false"
+      hidden
+    >
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+        <circle
+          cx="12"
+          cy="12"
+          r="10"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        />
+        <path
+          d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+    </button>
+
+    <button
       id="sound-btn"
       type="button"
       class="fs-btn sound-btn"
@@ -130,6 +159,15 @@
             <dt>CENTER</dt>
             <dd class="range-cell">
               <span id="stat-location">&mdash;</span>
+              <button
+                id="center-locate"
+                type="button"
+                class="range-edit"
+                title="Center on your current location"
+                aria-label="Center on your current location"
+              >
+                Locate
+              </button>
               <button id="center-edit" type="button" class="range-edit" aria-haspopup="dialog">Set</button>
             </dd>
           </div>
@@ -683,6 +721,11 @@
       .sound-btn[aria-pressed='false'] .snd-icon-off { display: block; }
       .sound-btn[aria-pressed='true'] { opacity: 0.9; color: #baffd7; }
 
+      /* Compass lock: left of sound. Hidden until JS confirms a mobile /
+         orientation-capable device, so desktop never shows a dead control. */
+      .compass-btn { right: 106px; }
+      .compass-btn[aria-pressed='true'] { opacity: 0.9; color: #baffd7; }
+
       /* ---- Dev / demo panel ----------------------------------------------- */
       .dev-panel[hidden] { display: none; }
       .dev-panel {
@@ -790,6 +833,10 @@
       }
       .range-edit:hover {
         background: rgba(0, 255, 120, 0.25);
+      }
+      .range-edit:disabled {
+        opacity: 0.45;
+        cursor: wait;
       }
 
       .modal[hidden] { display: none; }
