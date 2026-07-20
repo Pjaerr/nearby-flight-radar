@@ -1153,8 +1153,13 @@ export class Radar {
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
 
-    // Concentric range rings (4 rings) with nm labels.
+    // Concentric range rings (4 rings) with nm labels. Labels sit on the
+    // geographic-north spoke so they stay with "N" when the view rotates —
+    // not on the screen-up lubber line.
     const rings = 4;
+    const northRad = this.screenBearing(0) * DEG;
+    const nSin = Math.sin(northRad);
+    const nCos = Math.cos(northRad);
     for (let i = 1; i <= rings; i++) {
       const rr = (R * i) / rings;
       ctx.globalAlpha = i === rings ? 0.7 : 0.36;
@@ -1163,7 +1168,8 @@ export class Radar {
       ctx.stroke();
       ctx.globalAlpha = 0.75;
       const nm = Math.round((this.rangeNm * i) / rings);
-      ctx.fillText(`${nm}`, cx + 4, cy - rr);
+      // Slight tangential offset so the digits sit beside the north spoke.
+      ctx.fillText(`${nm}`, cx + nSin * rr + 4 * nCos, cy - nCos * rr + 4 * nSin);
     }
     ctx.globalAlpha = 1;
 
@@ -1703,23 +1709,22 @@ export class Radar {
     return { x: cx + Math.sin(rad) * rr, y: cy - Math.cos(rad) * rr };
   }
 
-  // Fixed "lubber line" while compass-locked: always points to the top of the
-  // scope (the direction the device is facing), like the heading marker on the
-  // iOS Compass app. Geographic North is marked separately by _drawNorthArrow.
+  // Fixed "lubber line" while compass-locked: a short, bold tick just outside
+  // the outer ring at screen-up (facing direction), like the iOS Compass app.
+  // Deliberately thick so it doesn't read as the sweep arm.
   _drawHeadingLine(ctx, cx, cy, R) {
     if (!this.compassMode) return;
-    // Screen-up = facing direction (view heading sits at the top). Extends
-    // a little past the outer ring; kept inside the canvas margin (~22px).
-    const tipY = cy - (R + 14);
-    const accent = [180, 255, 210];
+    const y0 = cy - R - 1;
+    const y1 = cy - R - 16;
+    const accent = [200, 255, 220];
 
     ctx.save();
-    ctx.lineCap = "round";
-    ctx.strokeStyle = rgba(accent, 0.85);
-    ctx.lineWidth = 2;
+    ctx.lineCap = "butt";
+    ctx.strokeStyle = rgba(accent, 0.95);
+    ctx.lineWidth = 5;
     ctx.beginPath();
-    ctx.moveTo(cx, cy - 10);
-    ctx.lineTo(cx, tipY);
+    ctx.moveTo(cx, y0);
+    ctx.lineTo(cx, y1);
     ctx.stroke();
     ctx.restore();
   }
