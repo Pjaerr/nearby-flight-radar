@@ -1111,6 +1111,7 @@ export class Radar {
     this._drawFocus(ctx, cx, cy, R);
     this._drawBlips(ctx, cx, cy, R);
     this._drawCenter(ctx, cx, cy);
+    this._drawHeadingLine(ctx, cx, cy, R);
     this._drawNorthArrow(ctx, cx, cy, R);
 
     ctx.restore();
@@ -1700,6 +1701,48 @@ export class Radar {
     const rr = Math.min(1, Math.max(0, d / this.rangeNm)) * R;
     const rad = this.screenBearing(bearingDeg) * DEG;
     return { x: cx + Math.sin(rad) * rr, y: cy - Math.cos(rad) * rr };
+  }
+
+  // Fixed "lubber line" while compass-locked: always points to the top of the
+  // scope (the direction the device is facing), like the heading marker on the
+  // iOS Compass app. Geographic North is marked separately by _drawNorthArrow.
+  _drawHeadingLine(ctx, cx, cy, R) {
+    if (!this.compassMode) return;
+    // Screen-up = facing direction (view heading sits at the top).
+    const tipX = cx;
+    const tipY = cy - R;
+    const accent = [180, 255, 210];
+
+    ctx.save();
+    ctx.lineCap = "round";
+
+    // Soft spoke from just outside the center marker to the outer ring.
+    const grad = ctx.createLinearGradient(cx, cy - 10, tipX, tipY);
+    grad.addColorStop(0, rgba(accent, 0.05));
+    grad.addColorStop(0.55, rgba(accent, 0.35));
+    grad.addColorStop(1, rgba(accent, 0.85));
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = rgba(accent, 0.55);
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 10);
+    ctx.lineTo(tipX, tipY);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Chevron at the rim — the "you are facing this way" marker.
+    const ah = 8;
+    const half = 6;
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY - 2);
+    ctx.lineTo(tipX - half, tipY + ah);
+    ctx.lineTo(tipX + half, tipY + ah);
+    ctx.closePath();
+    ctx.fillStyle = rgba(accent, 0.95);
+    ctx.fill();
+
+    ctx.restore();
   }
 
   // Distinct north arrow on the rim while compass-locked, so the rotated scope

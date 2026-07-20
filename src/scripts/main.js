@@ -3781,20 +3781,32 @@ let compassListening = false;
 let compassRawHeading = null;
 let compassSmoothHeading = 0;
 let compassRaf = 0;
+let compassWired = false;
 
-function compassSupported() {
-  if (typeof window === 'undefined') return false;
-  // Coarse pointer / no-hover ≈ phone/tablet; also allow any device that
-  // exposes orientation events (some laptops with magnetometers).
-  const touchLike =
-    (window.matchMedia &&
-      (window.matchMedia('(hover: none) and (pointer: coarse)').matches ||
-        window.matchMedia('(max-width: 900px)').matches)) ||
-    (navigator.maxTouchPoints || 0) > 0;
-  const hasOrientation =
-    'DeviceOrientationEvent' in window ||
-    'ondeviceorientationabsolute' in window;
-  return touchLike && hasOrientation;
+function hasOrientationApi() {
+  return typeof window !== 'undefined' && 'DeviceOrientationEvent' in window;
+}
+
+// Phones/tablets only — not resized desktop windows or touch laptops that
+// expose DeviceOrientationEvent without a magnetometer.
+function isMobileLike() {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') {
+    return false;
+  }
+  const ua = navigator.userAgent || '';
+  const touchPoints = navigator.maxTouchPoints || 0;
+  // Desktop Mac/Windows/Linux UAs (iPadOS "desktop site" still has touch).
+  if (/Macintosh|Windows|Linux|CrOS/i.test(ua) && touchPoints < 2) {
+    return false;
+  }
+  if (/Android|iPhone|iPad|iPod|Mobile/i.test(ua)) return true;
+  const coarse = window.matchMedia?.('(hover: none) and (pointer: coarse)')
+    .matches;
+  return !!(coarse && touchPoints > 0);
+}
+
+function compassLikelySupported() {
+  return hasOrientationApi() && isMobileLike();
 }
 
 function headingFromOrientationEvent(e) {
@@ -3863,8 +3875,12 @@ function syncCompassButton() {
   if (!els.compass) return;
   els.compass.setAttribute('aria-pressed', String(compassOn));
   els.compass.title = compassOn
-    ? 'Unlock compass orientation'
+    ? 'Compass orientation on'
     : 'Orient radar to compass';
+  els.compass.setAttribute(
+    'aria-label',
+    compassOn ? 'Disable compass orientation' : 'Enable compass orientation',
+  );
 }
 
 async function requestCompassPermission() {
@@ -3904,15 +3920,50 @@ async function setCompass(on) {
   syncCompassButton();
 }
 
-function wireCompass() {
-  if (!els.compass) return;
-  if (!compassSupported()) {
-    els.compass.hidden = true;
-    return;
-  }
+function revealCompassButton() {
+  if (!els.compass || compassWired) return;
+  compassWired = true;
   els.compass.hidden = false;
   syncCompassButton();
   els.compass.addEventListener('click', () => setCompass(!compassOn));
+}
+
+// Show the compass control only when the device can actually supply a heading.
+// iOS needs a tap to grant permission, so we reveal there up front; elsewhere
+// we probe orientation events and stay hidden if none arrive.
+function wireCompass() {
+  if (!els.compass) return;
+  els.compass.hidden = true;
+  if (!compassLikelySupported()) return;
+
+  // iOS: permission gate means we can't probe silently — show the button so
+  // the user can opt in. Denied permission leaves the button visible to retry.
+  const DOE = window.DeviceOrientationEvent;
+  if (DOE && typeof DOE.requestPermission === 'function') {
+    revealCompassButton();
+    return;
+  }
+
+  let done = false;
+  const onProbe = (e) => {
+    if (done) return;
+    if (headingFromOrientationEvent(e) == null) return;
+    done = true;
+    cleanup();
+    revealCompassButton();
+  };
+  const cleanup = () => {
+    window.removeEventListener('deviceorientationabsolute', onProbe, true);
+    window.removeEventListener('deviceorientation', onProbe, true);
+  };
+  window.addEventListener('deviceorientationabsolute', onProbe, true);
+  window.addEventListener('deviceorientation', onProbe, true);
+  // No usable heading → keep the button hidden (desktop / no magnetometer).
+  setTimeout(() => {
+    if (done) return;
+    done = true;
+    cleanup();
+  }, 2500);
 }
 
 // ---- Screen wake lock -----------------------------------------------------

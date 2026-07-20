@@ -76,8 +76,18 @@
           stroke-width="2"
         />
         <path
+          class="compass-needle-stroke"
           d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"
           fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+        <path
+          class="compass-needle-fill"
+          d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"
+          fill="currentColor"
           stroke="currentColor"
           stroke-width="2"
           stroke-linecap="round"
@@ -676,6 +686,11 @@
         opacity: 0.55;
         transition: opacity 0.15s ease, background 0.15s ease;
       }
+      /* Author `display: flex` above would otherwise override the HTML hidden
+         attribute and keep unsupported controls (e.g. compass) visible. */
+      .fs-btn[hidden] {
+        display: none !important;
+      }
       .fs-btn:hover {
         opacity: 1;
         background: rgba(0, 255, 120, 0.2);
@@ -724,7 +739,17 @@
       /* Compass lock: left of sound. Hidden until JS confirms a mobile /
          orientation-capable device, so desktop never shows a dead control. */
       .compass-btn { right: 106px; }
-      .compass-btn[aria-pressed='true'] { opacity: 0.9; color: #baffd7; }
+      .compass-btn .compass-needle-fill { display: none; }
+      .compass-btn[aria-pressed='true'] {
+        opacity: 1;
+        color: #e6ffef;
+        background: rgba(0, 255, 120, 0.28);
+        border-color: rgba(160, 255, 200, 0.95);
+        box-shadow: 0 0 12px rgba(0, 255, 120, 0.45);
+      }
+      /* Solid needle when locked so the on-state reads at a glance. */
+      .compass-btn[aria-pressed='true'] .compass-needle-stroke { display: none; }
+      .compass-btn[aria-pressed='true'] .compass-needle-fill { display: block; }
 
       /* ---- Dev / demo panel ----------------------------------------------- */
       .dev-panel[hidden] { display: none; }
