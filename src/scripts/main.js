@@ -3811,8 +3811,9 @@ function makeDemoAircraft(kind) {
         type: 'B77W',
         model: 'BOEING 777-300ER',
         sizeClass: 'heavy',
-        altFt: 11500,
-        verticalRateFpm: 1600,
+        // High cruise so demo mode shows the hollow/dim altitude cue.
+        altFt: 33000,
+        verticalRateFpm: 0,
         route: {
           airline: 'British Airways',
           origin: demoAirport('LHR', 'EGLL', 'London', 'Heathrow', 'GB', 'United Kingdom', 51.4706, -0.4619),
@@ -3930,15 +3931,17 @@ function makeDemoAircraft(kind) {
 function spawnDemo(kind) {
   const a = makeDemoAircraft(kind);
   demoBlips.set(a.hex, a);
-  radar.blips.set(a.hex, {
-    ...a,
-    intensity: 0,
-    labelAlpha: 0,
-    routeResolved: true,
-    routePending: false,
-    announced: false,
-    lastUpdate: performance.now(),
-  });
+  // Go through update() so trail seeding / interpolation match live traffic.
+  radar.update([a]);
+  const b = radar.blips.get(a.hex);
+  if (b) {
+    b.route = a.route;
+    b.routeResolved = true;
+    b.routePending = false;
+    b.intensity = 0;
+    b.labelAlpha = 0;
+    b.announced = false;
+  }
   if (a.route) recordRouteCountries(a.route, a);
   updateAircraftList();
 }
@@ -3960,15 +3963,16 @@ function keepDemoAlive() {
     if (b) {
       b.lastUpdate = now;
     } else {
-      radar.blips.set(hex, {
-        ...a,
-        intensity: 0,
-        labelAlpha: 0,
-        routeResolved: true,
-        routePending: false,
-        announced: false,
-        lastUpdate: now,
-      });
+      radar.update([a]);
+      const again = radar.blips.get(hex);
+      if (again) {
+        again.route = a.route;
+        again.routeResolved = true;
+        again.routePending = false;
+        again.intensity = 0;
+        again.labelAlpha = 0;
+        again.announced = false;
+      }
     }
   }
 }

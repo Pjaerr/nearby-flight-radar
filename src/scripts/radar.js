@@ -37,9 +37,10 @@ function enuToPolar(e, n) {
 }
 
 // Advance a center-relative polar position along a ground track for dt seconds.
+// Negative dtSec dead-reckons backwards (used to seed contrail history).
 function advancePolar(distanceNm, bearingDeg, trackDeg, speedKt, dtSec) {
   if (
-    dtSec <= 0 ||
+    !dtSec ||
     typeof trackDeg !== "number" ||
     typeof speedKt !== "number" ||
     speedKt <= 0
@@ -79,7 +80,9 @@ const PHOSPHOR_RGB = [150, 255, 190];
 // fading tail behind the blip, like the persistence smear on a real CRT scope.
 // Positions arrive once per poll (every few seconds), so a handful of fixes
 // spans a decent stretch of track without the tail growing unwieldy.
-const TRAIL_MAX = 7;
+// Cap is sized for high-altitude "contrails"; lower contacts draw a shorter
+// slice of the same history (see altitudeCue.trailLen).
+const TRAIL_MAX = 14;
 // Peak opacity of the freshest trail segment (before the blip's sweep glow
 // scales it down further). Additive blending and a soft bloom make this read
 // as glowing phosphor rather than a flat line, so it stays subtle despite the
@@ -212,13 +215,73 @@ function formatAirport(ap) {
   return flag ? `${flag} ${label}` : label;
 }
 
-// Distance (nautical miles) at which the depth cue reaches full strength.
-// The size/dimming falloff is based on a contact's *absolute* distance rather
-// than its position within the current range, so a plane 2 nm away looks close
-// whether the scope is set to 2 nm or 50 nm. At a tight range every contact is
-// genuinely nearby and stays full size/brightness; only genuinely distant
-// aircraft (approaching this many nm) shrink and dim.
-const DEPTH_FULL_NM = 40;
+// ---- Altitude visual cue (hybrid) ----------------------------------------
+// Horizontal depth (ring position) already shrinks/dims outer contacts;
+// altitude gets a lighter matching cue so a FL330 overhead doesn't read as
+// "right there".
+// Low contacts stay solid and bright; high ones keep a filled silhouette with
+// a subtle hatch. The stronger height signal is trail length: high contacts
+// keep a longer phosphor "contrail".
+const ALT_LOW_FT = 7000;
+const ALT_HIGH_FT = 20000;
+// Soft ceiling used only to keep the high-band falloff from bottoming out
+// too early (cruise airliners sit around here).
+const ALT_CEILING_FT = 40000;
+// Focus-mode elevation stalk: max drawn length in CSS pixels.
+const ALT_STALK_MAX_PX = 26;
+
+// Map barometric altitude to drawing multipliers. Unknown/ground altitudes
+// leave the blip untouched so we don't invent a height cue.
+function altitudeCue(altFt) {
+  if (typeof altFt !== "number" || !(altFt > 0)) {
+    return {
+      glowMul: 1,
+      sizeMul: 1,
+      haloMul: 1,
+      hatched: false,
+      stalkFrac: 0,
+      trailLen: 5,
+    };
+  }
+
+  if (altFt <= ALT_LOW_FT) {
+    // Pattern / approach: slight boost, short trail (no real contrail down low).
+    const t = altFt / ALT_LOW_FT; // 0 near deck → 1 at low band
+    return {
+      glowMul: 1.05 - 0.05 * t,
+      sizeMul: 1.02 - 0.02 * t,
+      haloMul: 1,
+      hatched: false,
+      stalkFrac: 0.15 + 0.2 * (altFt / ALT_HIGH_FT),
+      trailLen: 3 + Math.round(2 * t), // 3..5
+    };
+  }
+
+  if (altFt < ALT_HIGH_FT) {
+    // Mid levels: nearly normal phosphor, trail growing toward cruise length.
+    const t = (altFt - ALT_LOW_FT) / (ALT_HIGH_FT - ALT_LOW_FT);
+    return {
+      glowMul: 1 - 0.08 * t,
+      sizeMul: 1 - 0.03 * t,
+      haloMul: 1 - 0.35 * t, // 1 → 0.65
+      hatched: false,
+      stalkFrac: 0.35 + 0.3 * t,
+      trailLen: 5 + Math.round(3 * t), // 5..8
+    };
+  }
+
+  // High cruise: filled + subtle hatch + mild dim; longer contrail does most
+  // of the work. Halo shrinks so the blip feels less "present".
+  const t = Math.min(1, (altFt - ALT_HIGH_FT) / (ALT_CEILING_FT - ALT_HIGH_FT));
+  return {
+    glowMul: 0.88 - 0.06 * t,
+    sizeMul: 0.97 - 0.02 * t,
+    haloMul: 0.45 - 0.2 * t, // 0.45 → 0.25
+    hatched: true,
+    stalkFrac: 0.65 + 0.35 * t,
+    trailLen: 8 + Math.round(6 * t), // 8..14
+  };
+}
 
 // Vertical rates below this magnitude (ft/min) read as level flight rather
 // than a climb or descent, so small sensor noise doesn't flip the arrow.
@@ -764,15 +827,84 @@ export class Radar {
   // TRAIL_MAX. Stored in polar form (distance nm + bearing deg) so it maps to
   // the scope exactly the way the blip itself is plotted, and skips repeats so
   // a plane holding position doesn't pile up identical points.
+  //
+  // On first sighting (or when the trail is still shorter than the altitude
+  // cue wants), missing points are dead-reckoned backwards along track/speed
+  // so a high contact shows a full contrail immediately instead of waiting
+  // for several poll cycles to accumulate.
   _extendTrail(existing, a) {
-    const trail =
+    const want = Math.min(TRAIL_MAX, altitudeCue(a.altFt).trailLen);
+    let trail =
       existing && Array.isArray(existing.trail) ? existing.trail.slice() : [];
+
+    if (trail.length === 0) {
+      return this._guessTrail(a, want);
+    }
+
     const last = trail[trail.length - 1];
     if (!last || last.d !== a.distanceNm || last.b !== a.bearingDeg) {
       trail.push({ d: a.distanceNm, b: a.bearingDeg });
       if (trail.length > TRAIL_MAX) trail.shift();
     }
+
+    if (trail.length < want) {
+      trail = this._backfillTrail(trail, a, want);
+    }
     return trail;
+  }
+
+  // Dead-reckon a full trail ending at the current fix. Step size matches the
+  // expected poll cadence so seeded points sit where later real polls will.
+  _guessTrail(a, count) {
+    const n = Math.max(1, count | 0);
+    const cur = { d: a.distanceNm, b: a.bearingDeg };
+    if (
+      n < 2 ||
+      typeof a.trackDeg !== "number" ||
+      typeof a.groundSpeedKt !== "number" ||
+      a.groundSpeedKt <= 0
+    ) {
+      return [cur];
+    }
+
+    const stepSec = (this.expectedPollMs || CONFIG.pollIntervalMs) / 1000;
+    // Walk backwards from the current fix, then reverse so index 0 is oldest.
+    const rev = [cur];
+    let d = cur.d;
+    let b = cur.b;
+    for (let i = 1; i < n; i++) {
+      const prev = advancePolar(d, b, a.trackDeg, a.groundSpeedKt, -stepSec);
+      d = prev.distanceNm;
+      b = prev.bearingDeg;
+      rev.push({ d, b });
+    }
+    rev.reverse();
+    return rev;
+  }
+
+  // Prepend guessed older points until `trail` reaches `count`, retreating
+  // from the current oldest sample (used when a contact climbs into a band
+  // that wants a longer contrail).
+  _backfillTrail(trail, a, count) {
+    if (
+      typeof a.trackDeg !== "number" ||
+      typeof a.groundSpeedKt !== "number" ||
+      a.groundSpeedKt <= 0
+    ) {
+      return trail;
+    }
+    const stepSec = (this.expectedPollMs || CONFIG.pollIntervalMs) / 1000;
+    const out = trail.slice();
+    let d = out[0].d;
+    let b = out[0].b;
+    while (out.length < count) {
+      const prev = advancePolar(d, b, a.trackDeg, a.groundSpeedKt, -stepSec);
+      d = prev.distanceNm;
+      b = prev.bearingDeg;
+      out.unshift({ d, b });
+    }
+    if (out.length > TRAIL_MAX) out.splice(0, out.length - TRAIL_MAX);
+    return out;
   }
 
   /** Remove blips we haven't heard about in `staleAfterSec`. */
@@ -1285,6 +1417,38 @@ export class Radar {
     ctx.restore();
   }
 
+  // Short elevation stalk for the focused contact: a phosphor drop from the
+  // blip toward the scope centre (you), capped so it stays a height cue rather
+  // than a spoke across the scope. Length scales with altitudeFrac (0..1).
+  _drawAltitudeStalk(ctx, x, y, cx, cy, stalkFrac, glow, rgb) {
+    if (stalkFrac <= 0.02 || glow <= 0.02) return;
+    const dx = cx - x;
+    const dy = cy - y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 4) return;
+    const len = Math.min(ALT_STALK_MAX_PX, dist * 0.45) * stalkFrac;
+    const ux = dx / dist;
+    const uy = dy / dist;
+    const x2 = x + ux * len;
+    const y2 = y + uy * len;
+    // Perpendicular tick at the "ground" end.
+    const tick = 3.5;
+    const px = -uy * tick;
+    const py = ux * tick;
+
+    ctx.save();
+    ctx.strokeStyle = rgba(rgb, 0.55 * glow);
+    ctx.lineWidth = 1;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(x + ux * 6, y + uy * 6); // start just outside the silhouette
+    ctx.lineTo(x2, y2);
+    ctx.moveTo(x2 - px, y2 - py);
+    ctx.lineTo(x2 + px, y2 + py);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   _drawBlips(ctx, cx, cy, R) {
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
@@ -1302,15 +1466,13 @@ export class Radar {
       const x = cx + Math.sin(rad) * rr;
       const y = cy - Math.cos(rad) * rr;
 
-      // Fake a little depth based on *absolute* distance, not ring position:
-      // contacts far away (approaching DEPTH_FULL_NM) shrink slightly (down to
-      // ~75%) and the sweep flares them a touch fainter (down to ~70%). At a
-      // tight range every contact is genuinely close, so the factor stays near
-      // 1 and nothing is dimmed/resized. A real PPI scope keeps blips the same
-      // size but distant echoes are weaker, so the dimming is the authentic cue
-      // and the size falloff is a subtle stylistic depth hint.
-      const depthFrac = Math.min(1, Math.max(0, d / DEPTH_FULL_NM));
-      const sizeFactor = 1 - 0.25 * depthFrac;
+      // Soft depth from ring position (fraction of the current range): contacts
+      // near the outer ring shrink slightly (down to ~75%) and flare a touch
+      // fainter (down to ~70%). Size/brightness then agree with where the blip
+      // sits — a plane halfway out looks the same at 5 nm or 50 nm range.
+      // Dimming is the more authentic PPI cue; size falloff is a light hint.
+      const depthFrac = Math.min(1, Math.max(0, d / this.rangeNm));
+      let sizeFactor = 1 - 0.25 * depthFrac;
       const distDim = 1 - 0.3 * depthFrac;
 
       // Visibility is driven entirely by the sweep: a plane flares to full
@@ -1319,18 +1481,33 @@ export class Radar {
       // repeats. Skip drawing once fully decayed.
       if (b.intensity <= 0.02) continue;
       const { rgb, special } = blipAccent(b);
+
+      // Altitude cue layered on top of horizontal depth: low contacts stay
+      // solid/bright; high ones shrink, dim slightly, and (above ALT_HIGH_FT)
+      // get a subtle hatch fill so a jet at FL330 doesn't feel as present as
+      // a low approach.
+      const alt = altitudeCue(b.altFt);
+      // Special accents keep a solid fill and a brightness floor so alerts
+      // don't pick up the high-altitude hatch treatment.
+      const hatched = alt.hatched && !special;
+      const altGlowMul = special ? Math.max(alt.glowMul, 0.92) : alt.glowMul;
+      sizeFactor *= special ? Math.max(alt.sizeMul, 0.96) : alt.sizeMul;
+
       // Special contacts pulse in brightness; ordinary ones hold steady.
       const pulseMul = special ? 0.7 + 0.3 * this.pulse : 1;
-      const glow = b.intensity * distDim * pulseMul;
+      const glow = b.intensity * distDim * pulseMul * altGlowMul;
 
       // Phosphor trail first, so the blip and its halo sit on top of the tail.
       this._drawTrail(ctx, cx, cy, R, b, glow, rgb);
 
       // Special traffic gets a slightly larger, colour-matched halo so it
-      // reads as an alert rather than ordinary phosphor.
-      const haloR = (12 + glow * 10) * sizeFactor * (special ? 1.25 : 1);
+      // reads as an alert rather than ordinary phosphor. High contacts keep a
+      // smaller, softer halo so they feel less "right there".
+      const haloMul = special ? Math.max(alt.haloMul, 0.7) : alt.haloMul;
+      const haloR =
+        (12 + glow * 10) * sizeFactor * (special ? 1.25 : 1) * haloMul;
       const halo = ctx.createRadialGradient(x, y, 0, x, y, haloR);
-      halo.addColorStop(0, rgba(rgb, 0.9 * glow));
+      halo.addColorStop(0, rgba(rgb, 0.9 * glow * Math.max(0.4, haloMul)));
       halo.addColorStop(1, rgba(rgb, 0));
       ctx.beginPath();
       ctx.arc(x, y, haloR, 0, TAU);
@@ -1347,11 +1524,16 @@ export class Radar {
         b.sizeClass,
         rgb,
         b.isRotor,
+        hatched,
       );
 
       // A targeting reticle brackets the focused contact so the lock-on reads
-      // clearly even against the empty scope.
-      if (b.hex === this.focusedHex) this._drawReticle(ctx, x, y, sizeFactor);
+      // clearly even against the empty scope. The elevation stalk is focus-only
+      // so the scope stays uncluttered for ordinary traffic.
+      if (b.hex === this.focusedHex) {
+        this._drawAltitudeStalk(ctx, x, y, cx, cy, alt.stalkFrac, glow, rgb);
+        this._drawReticle(ctx, x, y, sizeFactor);
+      }
 
       // Label: flight number + route, fading with labelAlpha. When a dedicated
       // overlay layer exists, cards are drawn there instead (see _drawLabels)
@@ -1490,9 +1672,14 @@ export class Radar {
   // quadratically with age to mimic the tube's exponential persistence decay.
   // The whole trail is scaled by the blip's current sweep glow so it flares and
   // fades with the contact rather than lingering as a static scribble.
+  // High-altitude contacts use more history points so the tail reads as a
+  // longer contrail; low contacts keep a short stub.
   _drawTrail(ctx, cx, cy, R, b, glow, rgb) {
-    const trail = b.trail;
-    if (!trail || trail.length < 2 || glow <= 0.02) return;
+    const raw = b.trail;
+    if (!raw || raw.length < 2 || glow <= 0.02) return;
+    const trailLen = altitudeCue(b.altFt).trailLen;
+    const trail = raw.length > trailLen ? raw.slice(-trailLen) : raw;
+    if (trail.length < 2) return;
 
     ctx.save();
     // Phosphor emits light, so overlapping glow should add up and bloom.
@@ -1565,6 +1752,7 @@ export class Radar {
   // `sizeClass` ('light' | 'medium' | 'heavy') selects the icon shape and a
   // base size so a jumbo reads bigger than a light aircraft at a glance.
   // `isRotor` swaps in a helicopter symbol regardless of size bucket.
+  // `hatched` fills the silhouette with a subtle diagonal hatch (high-alt cue).
   _drawPlane(
     ctx,
     x,
@@ -1575,6 +1763,7 @@ export class Radar {
     sizeClass = "medium",
     rgb = PHOSPHOR_RGB,
     isRotor = false,
+    hatched = false,
   ) {
     // Fade the plane entirely with the phosphor glow so it vanishes between
     // sweeps rather than lingering as a static dot. `sizeFactor` shrinks
@@ -1602,7 +1791,7 @@ export class Radar {
     if (isRotor) {
       // A helicopter draws its own body + rotor (mixed fill/stroke), so it
       // handles alpha itself and returns rather than sharing the plane fill.
-      this._heliShape(ctx, alpha, glow, rgb);
+      this._heliShape(ctx, alpha, glow, rgb, hatched);
       ctx.restore();
       return;
     }
@@ -1612,9 +1801,15 @@ export class Radar {
     if (sizeClass === "light") this._lightPath(ctx);
     else this._jetPath(ctx);
 
-    ctx.fillStyle = rgba(rgb, alpha);
-    ctx.fill();
+    this._fillSilhouette(ctx, rgb, alpha, hatched);
+
     if (glow > 0.02) {
+      // Hatch drawing issues its own beginPath calls, so rebuild the outline
+      // path before stroking when we used the hatched fill.
+      if (hatched) {
+        if (sizeClass === "light") this._lightPath(ctx);
+        else this._jetPath(ctx);
+      }
       // Lighten the accent for the outline so the silhouette keeps a crisp
       // hot edge in its own colour.
       const edge = rgb.map((c) => Math.min(255, c + 50));
@@ -1625,20 +1820,50 @@ export class Radar {
     ctx.restore();
   }
 
+  // Fill the current silhouette path: solid phosphor, or a soft base fill
+  // with a clipped diagonal hatch for high-altitude contacts.
+  _fillSilhouette(ctx, rgb, alpha, hatched) {
+    if (!hatched) {
+      ctx.fillStyle = rgba(rgb, alpha);
+      ctx.fill();
+      return;
+    }
+
+    // Soft base so the hatch reads as texture rather than empty outline.
+    ctx.fillStyle = rgba(rgb, alpha * 0.72);
+    ctx.fill();
+
+    ctx.save();
+    ctx.clip();
+    // Slightly brighter hatch lines — sparse and thin so the cue stays subtle
+    // at small icon scales.
+    const hatch = rgb.map((c) => Math.min(255, c + 35));
+    ctx.strokeStyle = rgba(hatch, Math.max(0.12, alpha * 0.38));
+    ctx.lineWidth = 0.65;
+    ctx.lineCap = "butt";
+    const step = 2.6;
+    for (let i = -22; i <= 22; i += step) {
+      ctx.beginPath();
+      ctx.moveTo(i - 16, -16);
+      ctx.lineTo(i + 16, 16);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   // Top-down helicopter symbol, pointing North (up), drawn in the already
   // translated/rotated/scaled context set up by `_drawPlane`. A filled fuselage
   // with a tail boom and tail rotor, overlaid by two diagonally-crossed main
   // rotor blades. The diagonal blades read unmistakably as a helicopter and
   // never look like the horizontal wings of a fixed-wing icon.
-  _heliShape(ctx, alpha, glow, rgb) {
+  _heliShape(ctx, alpha, glow, rgb, hatched = false) {
     // Fuselage: a rounded body with a tail boom running aft to a small tail
-    // rotor, built as one filled path.
+    // rotor, built as one filled path (optionally hatched for high altitude).
     ctx.beginPath();
     ctx.ellipse(0, -1.5, 2.4, 4.6, 0, 0, TAU); // cabin/fuselage
     ctx.rect(-0.7, 2.5, 1.4, 6); // tail boom
     ctx.rect(-2.6, 8, 5.2, 1.2); // tail rotor
-    ctx.fillStyle = rgba(rgb, alpha);
-    ctx.fill();
+    this._fillSilhouette(ctx, rgb, alpha, hatched);
 
     // Main rotor: two blades crossed on the diagonal, drawn as bright strokes
     // with round caps so they read as spinning blades over the cabin.
