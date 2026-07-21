@@ -3774,7 +3774,7 @@ function vibrateNewContact() {
 // On mobile, lock the PPI so the top of the scope matches the device compass
 // heading. Requires DeviceOrientation (and on iOS 13+, an explicit permission
 // grant under a user gesture). Aircraft, airports, trails, and icons all
-// rotate with the view; a north arrow marks geographic North.
+// rotate with the view; a heading arrow at screen-up marks facing direction.
 
 let compassOn = false;
 let compassListening = false;
