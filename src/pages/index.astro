@@ -847,7 +847,7 @@
          the top button row by reserving vertical space. The immersive rule above
          still wins (higher specificity) and keeps its padding: 0. */
       @media (max-width: 900px) {
-        .app { padding-top: 64px; }
+        .app { padding-top: calc(64px + env(safe-area-inset-top, 0px)); }
       }
 
       .range-cell {
