@@ -494,7 +494,8 @@ export class Radar {
     // Geographic bearings in the blip store are unchanged; drawing and hit-
     // testing subtract this so the whole PPI rotates under the sweep.
     this.viewHeadingDeg = 0;
-    // When true, a north arrow is drawn so the rotated scope stays readable.
+    // When true, a heading arrow (lubber) is drawn at screen-up so the
+    // rotated scope stays readable.
     this.compassMode = false;
     this.lastFrame = 0;
     // `running` is the caller's intent (start/stop). The loop only actually
@@ -558,7 +559,7 @@ export class Radar {
     this.viewHeadingDeg = ((deg % 360) + 360) % 360;
   }
 
-  /** Toggle the north-arrow overlay used while compass-locked. */
+  /** Toggle the heading-arrow (lubber) overlay used while compass-locked. */
   setCompassMode(on) {
     this.compassMode = !!on;
     if (!this.compassMode) this.viewHeadingDeg = 0;
@@ -781,7 +782,7 @@ export class Radar {
     const { x, y } = this._clientToCanvas(clientX, clientY);
     const cx = this.size / 2;
     const cy = this.size / 2;
-    const R = this.size / 2 - 36;
+    const R = this.size / 2 - 22;
     const HIT_R = 20; // generous so small blips are easy to tap
     let best = null;
     let bestD2 = HIT_R * HIT_R;
@@ -1102,7 +1103,7 @@ export class Radar {
 
     const cx = size / 2;
     const cy = size / 2;
-    const R = size / 2 - 36; // margin for cardinals + outside lubber tick
+    const R = size / 2 - 22; // margin for cardinals + heading arrow
 
     this._drawBackground(ctx, cx, cy, R);
     this._drawGrid(ctx, cx, cy, R);
@@ -1112,7 +1113,6 @@ export class Radar {
     this._drawBlips(ctx, cx, cy, R);
     this._drawCenter(ctx, cx, cy);
     this._drawHeadingLine(ctx, cx, cy, R);
-    this._drawNorthArrow(ctx, cx, cy, R);
 
     ctx.restore();
 
@@ -1194,9 +1194,6 @@ export class Radar {
       ["W", 270],
     ];
     for (const [label, deg] of marks) {
-      // In compass mode the dedicated north arrow replaces the "N" text so we
-      // don't double-label the same rim position.
-      if (this.compassMode && label === "N") continue;
       const rad = this.screenBearing(deg) * DEG;
       const lx = cx + Math.sin(rad) * (R + 12);
       const ly = cy - Math.cos(rad) * (R + 12);
@@ -1709,58 +1706,26 @@ export class Radar {
     return { x: cx + Math.sin(rad) * rr, y: cy - Math.cos(rad) * rr };
   }
 
-  // Fixed "lubber line" while compass-locked: a short, bold tick just outside
-  // the outer ring at screen-up (facing direction), like the iOS Compass app.
-  // Deliberately thick so it doesn't read as the sweep arm.
+  // Fixed heading mark while compass-locked: a compact arrow just outside the
+  // outer ring at screen-up (facing direction). Same shape as the old geographic
+  // north arrow, but fixed to the lubber so it doesn't grow the scope margin.
   _drawHeadingLine(ctx, cx, cy, R) {
     if (!this.compassMode) return;
-    const y0 = cy - R - 2;
-    const y1 = cy - R - 32;
-    const accent = [200, 255, 220];
-
-    ctx.save();
-    ctx.lineCap = "butt";
-    ctx.strokeStyle = rgba(accent, 0.95);
-    ctx.lineWidth = 5;
-    ctx.beginPath();
-    ctx.moveTo(cx, y0);
-    ctx.lineTo(cx, y1);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // Compact north mark on the rim while compass-locked. Sized to fit in the
-  // scope's outer margin so the "N" isn't clipped off the canvas.
-  _drawNorthArrow(ctx, cx, cy, R) {
-    if (!this.compassMode) return;
-    const rad = this.screenBearing(0) * DEG;
-    const dirX = Math.sin(rad);
-    const dirY = -Math.cos(rad);
-    // Arrow sits between the outer ring and the label (margin is ~22px).
+    // Arrow sits between the outer ring and the cardinal labels (~22px margin).
     const tipR = R + 7;
     const baseR = R + 1;
-    const tipX = cx + dirX * tipR;
-    const tipY = cy + dirY * tipR;
-    const baseX = cx + dirX * baseR;
-    const baseY = cy + dirY * baseR;
-    const perpX = -dirY;
-    const perpY = dirX;
+    const tipY = cy - tipR;
+    const baseY = cy - baseR;
     const half = 5;
 
     ctx.save();
     ctx.beginPath();
-    ctx.moveTo(tipX, tipY);
-    ctx.lineTo(baseX + perpX * half, baseY + perpY * half);
-    ctx.lineTo(baseX - perpX * half, baseY - perpY * half);
+    ctx.moveTo(cx, tipY);
+    ctx.lineTo(cx + half, baseY);
+    ctx.lineTo(cx - half, baseY);
     ctx.closePath();
     ctx.fillStyle = "rgba(180, 255, 210, 0.95)";
     ctx.fill();
-    ctx.font = `bold 11px ${FONT_STACK}`;
-    ctx.fillStyle = "rgba(180, 255, 210, 0.95)";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    // Same radius as the ordinary E/S/W cardinal labels.
-    ctx.fillText("N", cx + dirX * (R + 14), cy + dirY * (R + 14));
     ctx.restore();
   }
 
