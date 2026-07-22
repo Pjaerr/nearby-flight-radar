@@ -53,6 +53,15 @@ function advancePolar(distanceNm, bearingDeg, trackDeg, speedKt, dtSec) {
   return enuToPolar(e + Math.sin(tr) * stepNm, n + Math.cos(tr) * stepNm);
 }
 
+// Signed distance of `point` ahead of `origin` along `trackDeg` (nm).
+// Positive means the point is in front of the origin along the ground track.
+function alongTrackNm(origin, point, trackDeg) {
+  const o = polarToEnu(origin.d, origin.b);
+  const p = polarToEnu(point.d, point.b);
+  const tr = trackDeg * DEG;
+  return (p.e - o.e) * Math.sin(tr) + (p.n - o.n) * Math.cos(tr);
+}
+
 function interpolationActive() {
   if (!CONFIG.interpolationEnabled) return false;
   try {
@@ -1752,22 +1761,37 @@ export class Radar {
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
-    const points = trail.map((p) => this._project(cx, cy, R, p.d, p.b));
-    // Bridge the polled trail toward the display position (scaled by strength
-    // so the tail doesn't outrun a subtly interpolated blip).
-    const strength = Math.min(
-      1,
-      Math.max(0, CONFIG.interpolationStrength ?? 1),
-    );
+    // Trail history stores polled fixes immediately, but the blip eases toward
+    // each new fix. Truncate any samples still ahead of the display position
+    // along track, then always terminate under the plane so the contrail tip
+    // can't sit in front of the icon while lerp catches up.
     const { d, bearing } = this._displayPos(b);
-    const last = trail[trail.length - 1];
-    if (strength > 0.05 && last && (last.d !== d || last.b !== bearing)) {
-      const bridgeD = last.d + (d - last.d) * strength;
-      const bridgeB = lerpAngle(last.b, bearing, strength);
-      if (bridgeD !== last.d || bridgeB !== last.b) {
-        points.push(this._project(cx, cy, R, bridgeD, bridgeB));
-      }
+    const display = { d, b: bearing };
+    let track = typeof b.trackDeg === "number" ? b.trackDeg : null;
+    if (track == null && trail.length >= 2) {
+      const a = trail[trail.length - 2];
+      const c = trail[trail.length - 1];
+      const ae = polarToEnu(a.d, a.b);
+      const ce = polarToEnu(c.d, c.b);
+      track = ((Math.atan2(ce.e - ae.e, ce.n - ae.n) * 180) / Math.PI + 360) % 360;
     }
+
+    const points = [];
+    for (const p of trail) {
+      if (
+        track != null &&
+        alongTrackNm(display, { d: p.d, b: p.b }, track) > 0.02
+      ) {
+        break;
+      }
+      points.push(this._project(cx, cy, R, p.d, p.b));
+    }
+    const tip = this._project(cx, cy, R, d, bearing);
+    const prev = points[points.length - 1];
+    if (!prev || Math.hypot(prev.x - tip.x, prev.y - tip.y) > 0.5) {
+      points.push(tip);
+    }
+
     const n = points.length;
     if (n < 2) {
       ctx.restore();
